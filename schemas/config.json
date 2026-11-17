@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/config.json",
   "title": "slack-notice config",
-  "description": "~/.config/slack-notice/config.yaml (XDG respected) plus config.d/*.yaml in lexical order. Invalid config exits 2 (config_invalid), naming the key. Drop-ins: maps merge, other lists replace. Precedence: flags, then environment (scalar keys only), then config, then defaults. Self-contained: no external references.",
+  "description": "~/.config/slack-notice/config.yaml (XDG respected) plus config.d/*.yaml in lexical order. Invalid config exits 2 (config_invalid), naming the key. Drop-ins: maps merge. Precedence: flags, then config, then defaults; there are no environment overrides. Files are parsed with yaml.safe_load, at most 65536 bytes. Self-contained: no external references.",
   "$defs": {
     "duration": {
       "anyOf": [
@@ -12,14 +12,10 @@
         },
         {
           "type": "string",
-          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)$"
-        },
-        {
-          "type": "string",
-          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?$"
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m)?$"
         }
       ],
-      "description": "Seconds as a positive number, a string <number><unit> with unit ms, s, m, h or d (e.g. '1s'), or a bare number string meaning seconds; zero is refused. Ranges are enforced by the loader and named in the key's description."
+      "description": "Seconds as a positive finite number, or a string matching [0-9]+(\\.[0-9]+)?(ms|s|m)? (no unit means seconds); zero is refused. Booleans are never accepted. Ranges are enforced by the loader and named in the key's description."
     }
   },
   "type": "object",
@@ -27,7 +23,7 @@
     "enabled": {
       "type": "boolean",
       "default": true,
-      "description": "false makes send exit 22 without reading the credential."
+      "description": "false makes send exit 22 without reading input or the credential."
     },
     "webhook_env": {
       "type": "string",
@@ -47,49 +43,44 @@
         "info": {
           "type": "string",
           "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}$",
-          "default": "INFO"
+          "default": "🔵 INFO"
         },
         "warn": {
           "type": "string",
           "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}$",
-          "default": "WARN"
+          "default": "🟠 WARN"
         },
         "action": {
           "type": "string",
           "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}$",
-          "default": "ACTION"
+          "default": "🟡 ACTION"
         },
         "error": {
           "type": "string",
           "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}$",
-          "default": "ERROR"
+          "default": "🔴 ERROR"
         }
       },
       "additionalProperties": false,
       "default": {
-        "info": "INFO",
-        "warn": "WARN",
-        "action": "ACTION",
-        "error": "ERROR"
+        "info": "🔵 INFO",
+        "warn": "🟠 WARN",
+        "action": "🟡 ACTION",
+        "error": "🔴 ERROR"
       },
-      "description": "One-line prefixes, at most 16 characters each. Cannot be set from the environment."
+      "description": "One-line prefixes, 1 to 16 characters each; a value that the sanitizer would change is config_invalid at load."
     },
     "max_chars": {
       "type": "integer",
       "minimum": 2000,
       "maximum": 12000,
       "default": 3000,
-      "description": "Body limit in Unicode code points."
-    },
-    "min_interval": {
-      "$ref": "#/$defs/duration",
-      "default": "1s",
-      "description": "Minimum time between sends from this machine, 1s to 60s."
+      "description": "Body limit in Unicode code points; a fixed 12000-byte cap also applies."
     },
     "timeout": {
       "$ref": "#/$defs/duration",
       "default": "10s",
-      "description": "Budget for one send, including waiting for the lock and retries, 1s to 120s."
+      "description": "The one wall-clock deadline of a send (input, lock wait, network, retries), 3s to 120s."
     },
     "log": {
       "type": "boolean",

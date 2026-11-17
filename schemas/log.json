@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/log.json",
   "title": "slack-notice log.jsonl record",
-  "description": "One record per outcome that reaches send step 3 or later (sent, refused, failed, outcome_unknown). Not logged: exit 1, exit 2, exit 22 and dry runs. Never contains a title, message, link, URL or credential. A log write failure warns only. Rotates at 1 MiB, keeping 3 files.",
+  "description": "One record per outcome that reaches send step 3 or later (sent, refused, failed, outcome_unknown). Not logged: exit 1, exit 2, exit 22 and dry runs. Never contains a title, message, link, URL or credential. A log write failure warns only. Rotates at 1 MiB, keeping 3 files. A state-directory problem writes no record and never changes the exit code.",
   "type": "object",
   "properties": {
     "ts": {
@@ -46,13 +46,10 @@
           "$ref": "defs.json#/$defs/refusal_reason"
         },
         {
-          "const": "locked"
-        },
-        {
           "type": "null"
         }
       ],
-      "description": "A refusal reason on refused, locked on unavailable, else null."
+      "description": "A refusal reason on refused, else null."
     },
     "level": {
       "oneOf": [
@@ -98,7 +95,7 @@
           "type": "null"
         }
       ],
-      "description": "Of the rendered body; null when nothing was rendered."
+      "description": "First 16 hex of the SHA-256 of the sanitized title, LF and sanitized message; null when not computed."
     },
     "dedupe_key_sha256": {
       "oneOf": [
@@ -212,13 +209,15 @@
             "enum": [
               "host_rejected",
               "auth_required",
+              "credential_invalid",
               "rate_limited",
-              "upstream_error",
               "network_error",
-              "wrong_host_response",
               "unavailable",
-              "state_unsafe"
+              "wrong_host_response"
             ]
+          },
+          "reason": {
+            "type": "null"
           }
         }
       }
@@ -240,52 +239,12 @@
             "const": 12
           },
           "code": {
-            "const": "outcome_unknown"
+            "enum": [
+              "outcome_unknown",
+              "upstream_error",
+              "wrong_host_response"
+            ]
           },
-          "reason": {
-            "type": "null"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "code": {
-            "const": "unavailable"
-          }
-        },
-        "required": [
-          "code"
-        ]
-      },
-      "then": {
-        "properties": {
-          "reason": {
-            "const": "locked"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "outcome": {
-            "const": "failed"
-          },
-          "code": {
-            "not": {
-              "const": "unavailable"
-            }
-          }
-        },
-        "required": [
-          "outcome",
-          "code"
-        ]
-      },
-      "then": {
-        "properties": {
           "reason": {
             "type": "null"
           }

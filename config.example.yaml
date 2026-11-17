@@ -1,14 +1,10 @@
 # slack-notice example config: every key with its built-in default.
-# Location: ~/.config/slack-notice/config.yaml (XDG_CONFIG_HOME respected), plus config.d/*.yaml in
-# lexical order; --config <path> reads another file (drop-ins are read next to it).
-# Drop-ins: maps merge, other lists replace.
-# Precedence: flags, then environment (scalar keys only), then config, then defaults.
-# Environment: SLACK_NOTICE_ENABLED, SLACK_NOTICE_WEBHOOK_ENV, SLACK_NOTICE_BODY_VARIABLE,
-# SLACK_NOTICE_MAX_CHARS, SLACK_NOTICE_MIN_INTERVAL, SLACK_NOTICE_TIMEOUT and SLACK_NOTICE_LOG set
-# the matching scalar keys. level_prefix cannot be set from the environment.
-# Durations: a number of seconds, or a string such as "500ms", "10s" or "1m" (the design guide's
-# duration grammar); zero is refused. The tool enforces each key's range at load (exit 2 config_invalid,
-# details.key).
+# Location: ~/.config/slack-notice/config.yaml (XDG_CONFIG_HOME is honoured when it is an absolute path),
+# plus config.d/*.yaml in lexical order; --config <path> reads another file (drop-ins are read next to it).
+# Drop-ins: maps merge. Files are parsed with yaml.safe_load and must be at most 64 KiB.
+# Precedence: flags, then config, then defaults. There are no environment overrides.
+# Durations: a number of seconds, or a string such as "500ms", "10s" or "1m" (no unit means seconds);
+# zero is refused. The tool enforces each key's range at load (exit 2 config_invalid, details.key).
 # Schema: schemas/config.json. Invalid config exits 2 (config_invalid), naming the key.
 
 # false makes send exit 22 (nothing sent) before any input or the credential is read.
@@ -21,21 +17,20 @@ webhook_env: SLACK_WEBHOOK
 # Name of the one text variable your Slack workflow declares.
 body_variable: body
 
-# One-line prefix for each level, at most 16 characters each.
+# One-line prefix for each level, 1 to 16 characters each; the sanitizer must leave it unchanged.
 level_prefix:
-  info: INFO
-  warn: WARN
-  action: ACTION
-  error: ERROR
+  info: "🔵 INFO"
+  warn: "🟠 WARN"
+  action: "🟡 ACTION"
+  error: "🔴 ERROR"
 
-# Body limit in characters (2000 to 12000). A longer message is cut and ends with "…[truncated]".
+# Body limit in characters (2000 to 12000). A fixed 12000-byte cap also applies.
+# A longer message is cut and ends with "…[truncated]".
 max_chars: 3000
 
-# Minimum time between sends from this machine (1s to 60s). Slack drops requests it throttles.
-min_interval: 1s
-
-# Budget for one send, including waiting for the send lock and retries (1s to 120s).
+# The one deadline of a send, covering input, waiting for the send lock, the request and retries (3s to 120s).
 timeout: 10s
 
-# false writes no log.jsonl (~/.local/state/slack-notice/log.jsonl). Dry runs, exit 2 and exit 22 are never logged.
+# false writes no log.jsonl (in the state directory, ~/.local/state/slack-notice by default).
+# Dry runs, exit 1, exit 2 and exit 22 are never logged.
 log: true

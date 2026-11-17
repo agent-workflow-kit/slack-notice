@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/notification.json",
   "title": "slack-notice notification (send --stdin-json, --file)",
-  "description": "One notification. Unknown fields exit 20 invalid_payload. Text limits are applied after sanitizing by the tool; the bounds here only cap the raw input. Flag input (--title, --message, --level, --link) forms the same object.",
+  "description": "One notification. Unknown fields exit 20 invalid_payload. Text limits are applied after sanitizing by the tool; the bounds here only cap the raw input. Null is a wrong type: absent fields are omitted. Flag input (--title, --message, --level, --link) forms the same object.",
   "type": "object",
   "properties": {
     "title": {
@@ -14,9 +14,8 @@
     "message": {
       "type": "string",
       "x-untrusted": true,
-      "minLength": 1,
       "maxLength": 100000,
-      "description": "Untrusted. At most 100000 characters of input; empty after sanitizing exits 20 empty_message."
+      "description": "Untrusted. At most 100000 characters of input; empty after sanitizing (including an empty string) exits 20 empty_message, so there is no minLength."
     },
     "level": {
       "$ref": "defs.json#/$defs/level",
@@ -25,9 +24,8 @@
     "link": {
       "type": "string",
       "x-untrusted": true,
-      "maxLength": 1024,
-      "pattern": "^https?://[^\\x00-\\x20\\x7f/?#@]+(?:[/?#][^\\x00-\\x20\\x7f]*)?$",
-      "description": "Untrusted. Checks only the syntactic gate: http or https, no userinfo, no whitespace or control characters, at most 1024 characters. The tool, not the schema, names a violation: another scheme exits 20 with reason link_scheme, any other violation reason link_invalid."
+      "pattern": "^[\\x21-\\x7e]{1,1024}$",
+      "description": "Untrusted. A coarse gate: 1 to 1024 printable ASCII characters (U+0021 to U+007E). The tool, not the schema, applies the rest of the link rule (scheme token http or https compared case-insensitively, the host and port grammar, no userinfo) and names a violation: another scheme exits 20 with reason link_scheme, any other violation reason link_invalid. The tool is authoritative."
     }
   },
   "required": [
