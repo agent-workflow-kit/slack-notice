@@ -1,41 +1,291 @@
 # slack-notice: interface
 
-Status: not yet specified. Written in this tool's design session, before implementation.
+Status: 0.1.0-design, 2026-11-17 (review pass 2 resolved). Written before implementation (architecture section 18.1). This document is the single normative source for slack-notice's rules; `docs/design.md`, the README and the architecture link to its headings and do not restate them.
+
+slack-notice sends one plain-text notification to Slack through a Slack workflow's webhook trigger. It is stateless: it keeps no database, only `log.jsonl` and two lock files. It runs no hooks and takes no policy decisions: when to send, what to send and how often belong to its caller.
+
+References: architecture (`../awkit-docs/architecture.md`) sections 5.1, 13.2, 13.3, 15 and 20; design guide (`../awkit-docs/design-guide.md`).
+
+## Concepts
+
+### Transport
+
+0.x has one transport, the **workflow trigger**: a Slack Workflow Builder workflow that starts from "a webhook" and sends a message containing one text variable. The URL looks like `https://hooks.slack.com/triggers/…` and is a secret (anyone holding it can post to the workflow). The workflow decides where the message goes (a person or a channel) and what it looks like around the variable; the message appears from the workflow's app, not from a person. The classic incoming webhook (`/services/…`), `chat.postMessage` with a token and the official Slack CLI are not supported in 0.x ([Residual risks](#residual-risks)).
+
+The user's workflow has exactly one text variable (name set by config `body_variable`, default `body`); everything the tool sends is folded into that one string.
+
+### Notification
+
+A notification is a JSON object ([schemas/notification.json](../schemas/notification.json)):
+
+| Field | Type | Required | Rule |
+|---|---|---|---|
+| `title` | string | no | One line; cut at 256 characters after sanitizing (see [Rendering](#rendering)). Input over 100000 characters exits 20 `invalid_payload`. |
+| `message` | string | yes | At most 100000 characters of input. Must not be empty after sanitizing or absent (else exit 20 `refused`, reason `empty_message`). |
+| `level` | `info`, `warn`, `action`, `error` | no | Default `info`. Ordered `info < warn < action < error`; the order matters to callers, not to slack-notice. |
+| `link` | string | no | 1 to 1024 printable ASCII characters, `http` or `https`; see the link rule below. Anything else exits 20 `refused`, reason `link_invalid`; `link_scheme` for another scheme. |
+
+link is optional and is checked in this order. (1) It is a string of 1 to 1024 printable ASCII characters (U+0021 to U+007E); anything else, including whitespace, control characters, non-ASCII characters and an empty string, is reason link_invalid (callers percent-encode paths and give hosts as punycode). (2) If it starts with a scheme token (`[A-Za-z][A-Za-z0-9+.-]*:`) whose lowercase form is not http or https, the reason is link_scheme. (3) It must match, as a whole, `(?i:https?)://HOST(?::[0-9]{1,5})?(?:[/?]T*)?(?:#T*)?` where HOST is `(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[[0-9A-Fa-f:.]+\])` and T is `(?:[A-Za-z0-9\-._~:/?@!$&'()*+,;=]|%[0-9A-Fa-f]{2})`; a port must be 1 to 65535 (taken from the match, never from a URL parser), and the text between the brackets must be a valid IPv6 address (`ipaddress.IPv6Address`); else the reason is link_invalid. There is no userinfo, empty host, backslash, quote, angle bracket, brace, bar, caret, backtick or invalid percent escape. The link is not parsed again: no code calls a URL parser on it. The scheme is lowercased wherever the link is rendered. The schema pattern is a coarse gate (printable ASCII, 1 to 1024); the tool is authoritative. A link names a place to open and is never a promise that it is safe: a caller that builds links from untrusted text takes that risk.
+
+Slack auto-links any bare URL in the text, so there is no `link_hosts` key: the URL is visible to the reader before they open it.
+
+Exactly one source is used: JSON on stdin (send --stdin-json, also the default when stdin is not a terminal and no text flag is given), JSON from --file <path> (--file - is stdin, the same source), or flags. These are flag and combination errors and exit 2 usage at step 1, before the config is consulted, so they win over a disabled tool: a JSON source together with --title, --message, --level or --link; --stdin-json together with --file <path>; --stdin-json or --file - when stdin is a terminal; stdin that is a terminal with no source and no --message; flags without --message; an unknown flag, a missing value, a bad --actor. A --file that does not exist, cannot be read or is not a regular file (the tool opens it with O_NONBLOCK and checks the opened descriptor; a symlink to a regular file is fine) exits 2 usage at step 3. A closed or unreadable stdin is empty input.
+
+Input is read through the gateway in slices of at most 100 ms, so the main thread notices the deadline and a signal between slices; a regular --file is read in chunks of 64 KiB with the same checks between chunks. At most 1048576 bytes are read from a source. More, input that is not valid UTF-8 or that begins with a byte order mark, JSON that fails to parse (any ValueError, RecursionError or OverflowError, whatever the Python version's limit on integer strings; the parser also refuses any number, because no field is a number), repeats an object key or contains NaN or Infinity, or a top-level value that is not an object exits 20 refused, reason invalid_payload, details.pointer `""`. Input that does not arrive within the deadline is a different case: nothing was sent and the bytes that did arrive were not judged, so it exits 12 `unavailable` (`details.phase` `input`, retryable true, unknown_outcome false). A SIGTERM, SIGINT or SIGHUP that arrives while input is read, or at any time before step 5, is not a deadline: the process exits 128+N with no envelope, sends nothing and writes no log record ([Webhook edge](#webhook-edge)).
+
+Fields: an unknown field, a field of the wrong type (null is a wrong type: absent fields are omitted), a level outside info, warn, action, error, or a title or message of more than 100000 characters exits 20 invalid_payload with details.pointer set to `/<field>` (a field name that does not match `[A-Za-z0-9_-]{1,64}` is reported as `/?`). A flag value is checked like the same JSON field and uses the same pointer. A message that is absent or empty after sanitizing is empty_message (reason empty_message, no pointer; the schema has no minLength for it). Error messages and details never contain an input value, only the pointer and the rule.
+
+The tool may exit without reading all of stdin (a refusal before step 3, an over-size input, any exit 20), so a caller ignores EPIPE and SIGPIPE on the stdin write.
+
+slack-notice never forwards free-form data. Flag text is untrusted and goes through the same [sanitizer](#sanitizer) and rendering as stdin text; flags exist for humans.
+
+### Sanitizer
+
+Applied to title and message before rendering, in this order. Every pattern in this document is matched against the whole string (re.fullmatch); a trailing newline never passes.
+
+1. Input is read as bytes and decoded as strict UTF-8, never through the locale. Invalid UTF-8 or a lone surrogate: exit 20 refused, reason invalid_payload.
+2. CRLF, CR, U+0085, U+2028 and U+2029 become LF. The tab becomes a space.
+3. The characters in the table below are removed; nothing else is. The table is the whole rule: the categories and the explicit list agree, and the golden test is pinned to a fixed code-point list, not to the Unicode version of the running Python.
+
+   | Removed | Code points |
+   |---|---|
+   | Control characters (Cc) other than LF (the tab became a space in step 2; VT and FF are removed, not turned into a space) | all of Cc except U+000A |
+   | Surrogates (Cs), private use (Co) and unassigned or noncharacter code points (Cn, including U+FDD0 to U+FDEF and U+FFFE and U+FFFF of every plane) | by category |
+   | Line and paragraph separators (Zl, Zp) | become LF in step 2 |
+   | Invisible format and filler characters, as an explicit list | U+00AD, U+061C, U+180E, U+200B, U+200E, U+200F, U+202A to U+202E, U+2060 to U+206F, U+FEFF, U+FFF9 to U+FFFB, the tag block U+E0000 to U+E007F, the variation selectors supplement U+E0100 to U+E01EF, the fillers U+115F, U+1160, U+3164 and U+FFA0, the braille blank U+2800 and the Mongolian free variation selectors U+180B to U+180D and U+180F |
+
+   Kept on purpose: U+FE00 to U+FE0F (variation selectors for emoji and CJK text), U+200C and U+200D (ZWNJ and ZWJ, which Persian, Indic scripts and emoji sequences need), the Arabic number signs U+0600 to U+0605, U+06DD, U+070F and U+08E2, and every other Cf character that is not in the list. Removed on purpose although some script shows them: the braille blank U+2800, the Mongolian free variation selectors U+180B to U+180D and U+180F, and the tag block (a flag drawn from tag characters becomes its base emoji). The removal covers zero-width, direction and tag characters, the soft hyphen and the byte order mark.
+4. Trailing whitespace of every line is removed (str.rstrip), then runs of more than two LF become two, then leading and trailing whitespace is removed (str.strip, Unicode whitespace).
+5. title only: every LF becomes a space, runs of spaces become one space, and the result is stripped again.
+
+A text is empty when it has no character other than Unicode whitespace, U+200C, U+200D and characters of the categories Mn, Mc and Me. A message that is empty after step 4 is refused with reason empty_message (so is a message that is absent from the JSON object). A title that is empty after step 5, or absent, is absent.
+
+No markup is escaped: the trigger variable is plain text, and Slack does not parse markup, mentions or `<url|label>` links in it, so entity escaping would show up as visible `&amp;`. Slack does auto-link any bare URL in the text, whether it came from `link`, `message` or `title`.
+
+### Rendering
+
+The body string is built as:
+
+```text
+<prefix> <title>
+<message>
+<link>
+```
+
+`<prefix>` is the level's entry in config `level_prefix`. The defaults are `🔵 INFO`, `🟠 WARN`, `🟡 ACTION` and `🔴 ERROR` (U+1F535, U+1F7E0, U+1F7E1, U+1F534 followed by a space and the level name); any one-line string of 1 to 16 characters that the title rule (sanitizer steps 1 to 5) leaves unchanged is allowed. The first line is the prefix alone, with no trailing space, when there is no title. The link line is omitted without a link. In short: `body = prefix_line + LF + message + (LF + link)`; the prefix line is never empty (1 to 16 characters for the prefix), so the title line is always present.
+
+Limits count Unicode code points. A title longer than 256 characters is cut to its first 255 characters plus … (256 in all, before the level prefix is added) and truncated is true. A message that does not fit its budget is cut: the kept text is the longest prefix of the sanitized message such that kept with trailing whitespace removed plus the marker `…[truncated]` fits every limit; truncated is true. A cut may split a combining or emoji sequence; that is accepted. The link is never cut.
+
+The message budget in code points is `max_chars - len(prefix_line) - 1 - (1 + len(link) if a link is given else 0)`, and the serialized request body (`{"<body_variable>":"<text>"}`, compact, `ensure_ascii=False`, UTF-8; see [Output](#output)) is at most 12000 bytes, so JSON escaping counts. The server does not truncate: a body over its limit is dropped with a success status, which is why the tool enforces its own limits. The kept length is the largest for which both limits hold, found by binary search. 256 + 16 + 1024 + 2 is below the `max_chars` minimum, so the message always has room.
 
 ## Commands
 
-To be specified.
+### `send`
+
+`slack-notice send [--stdin-json | --file <path|->] [--title <t>] [--message <m>] [--level <l>] [--link <url>] [--dedupe-key <k>] [--decision-id <id>]`
+
+Order, with the exit code of each refusal:
+
+1. Parse flags and check flag combinations (exit 2 `usage`).
+2. Look up the home directory and load config (exit 2 `config_invalid`; a home directory that cannot be used is `details.key` `home`, see [Config](#config)). `enabled: false` prints `{"outcome": "disabled"}` (with `--json`) or one line on stderr and exits 22 here, before any input is read.
+3. Read and validate input ([Notification](#notification); exit 2 `usage` for a `--file` problem; exit 20 `refused` with reason `invalid_payload`, `empty_message`, `link_invalid` or `link_scheme`). The [deadline](#webhook-edge) starts here. A SIGTERM, SIGINT or SIGHUP before step 5 exits 128+N with no envelope and no log record.
+4. Render the body ([Rendering](#rendering)). With `--dry-run`, print the result with `rendered` and exit 0: the credential is not read, nothing is sent, no state directory is used and nothing is logged.
+5. Read the webhook URL from the environment variable named by `webhook_env` and validate it ([Webhook edge](#webhook-edge)); exit 12 `credential_invalid` (`details.env`) when it is unset, empty or has the wrong shape.
+6. Take the send lock and wait for the spacing ([Send spacing](#send-spacing)), then POST the body ([Webhook edge](#webhook-edge)) and map the response to an exit code ([Exit codes](#exit-codes)).
+7. Print the result and flush it, then append the [log record](#log).
+
+--dedupe-key takes any non-empty string of at most 1024 characters (valid UTF-8, else exit 2 usage); a value that starts with `-` needs the `=` form (callers pass the `=` form with a hex digest of the key). It is only hashed; the send output echoes the caller's own key or null. --decision-id (repeatable) is accepted for uniformity with the design guide and ignored: the log is hash-only and there is no audit file. Slack has no deduplication, so the key changes nothing about delivery, only the log.
+
+### `validate`
+
+`slack-notice validate [--test-message]`
+
+validate never prompts. It prints {ok, enabled, checks: [{name, ok, message}]} (schemas/cli/validate.json), where enabled is the configured value; plain validate ignores enabled except to report it, so a tool with enabled false still reports its config and environment faults. Checks run in the order listed for the tool; a failed check ends the run and later checks are omitted, so ok is true only when every printed check is ok. It exits 0 when ok is true, otherwise with the exit code of the failing check (config: 2; every other check: 12). When the config cannot be loaded it prints the error envelope instead and exits 2. Without --json it prints one line per check on stderr.
+
+--test-message sends one notification through the normal render and send path (level info, title "slack-notice", message "validate: test message"; no dedupe key or tag) and adds the check test_message; its message says that delivery is not observable and tells the user to look at the destination. It is a send: it is logged like a send. A failed test_message check carries only the exit code (12), so a caller treats any non-zero exit as "look at the destination". With enabled false, --test-message makes no call: validate prints {"outcome":"disabled"} (schemas/cli/send.json) and exits 22 before any check, as send does at step 2. For --test-message the deadline and duration_ms start when that check starts; --dry-run has no effect on validate. Automation does not call --test-message; a doctor runs validate --json [--config <path>] and reads enabled.
+
+The checks of slack-notice, in order, are `config`, `credential` (the unset, empty and wrong-shape test in one; exit 12 `credential_invalid`) and, with `--test-message`, `test_message`. slack-notice has no `--probe` and no `platform` or `powershell` check: it has no read-only call that tells a live trigger URL from a dead one (spike A: a `GET` returned 200 and delivered nothing, and was never verified as a validity test), so a revoked URL is found only by `--test-message`. A successful `test_message` proves the URL is accepted, not that the message arrives: Slack accepts a request with a wrong variable name and drops it silently, so look in Slack.
 
 ## Global flags
 
-To be specified.
+Global flags may be given before or after the subcommand; a global flag given before the subcommand is never overwritten by the subparser's default.
+
+| Flag | Meaning |
+|---|---|
+| `--json` | Machine output on stdout ([Output](#output)). |
+| `--config <path>` | Config file instead of `.config/slack-notice/config.yaml` under the home directory; drop-ins are read from `config.d/` beside it. |
+| `--dry-run` | `send` only: render and print, send nothing, read no credential, write no log record (also for a refusal found in a dry run). |
+| `--actor <actor>` | Recorded in the log (`actor_source` `flag`); see the rule below. |
+| `--verbose`, `--quiet` | More or less human output on stderr; see [Output](#output). |
+| `--version` | Print `slack-notice <version>`. |
+
+`--actor` must match `^(human|auto):[A-Za-z0-9._@/-]{1,64}$` (else exit 2 usage). Without it the actor is human:<user> when stdin is a terminal (actor_source tty) and auto:unknown otherwise (default), where <user> is the login name from the password database with every character outside [A-Za-z0-9._@-] replaced by `_` and cut to 64 characters (`unknown` when the entry has no name left); the design guide's me.name does not exist here because the tool has no me key. A caller passes `auto:<name>`.
+
+## Send spacing
+
+Slack throttles a workflow webhook: a burst of 12 requests in about 3 seconds got 429 in testing; no sustained rate was measured, and 1 s spacing is a conservative guess. `send` opens `send.lock` in the state directory (mode 0600, created if missing, opened relative to the state directory descriptor like every state file) and takes an exclusive flock on it, polled without blocking every 50 ms inside the deadline. A lock file of size 0 means that no send has happened yet: there is no wait. Otherwise the send waits until one second has passed since the file's modification time, ignoring a modification time in the future or more than 1 s old. When the POST is about to start the send writes one byte to a file of size 0 and sets the modification time (`os.utime` on the descriptor). The lock is held until the end of step 6 (retries included) and released before the log record is written. A caller still waiting when the deadline passes exits 12 `unavailable` (`details.phase` `lock`, `retryable: true`) without sending. The lock is not fair and spaces calls from one machine only; the tool serializes sends for a caller up to its deadline, but a caller still sends one at a time ([Calling from automation](#calling-from-automation)). If the state directory is unusable there is no spacing ([Files](#files)). The spacing is fixed at 1 s; a configurable interval can return additively after a sustained-rate test.
+
+## Webhook edge
+
+- The URL comes only from the environment variable named by `webhook_env`; slack-notice never reads it from a file, and it never appears in argv, output, errors, verbose lines or the log, and is never printed as a URL. The URL (surrounding whitespace trimmed; empty after trimming is unset) must match `https://hooks\.slack\.com/triggers/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+){0,3}` as a whole: no port, userinfo, query, fragment, trailing dot, empty segment or other host. The check proves the variable holds a workflow-trigger URL, not that the URL is yours. Unset, empty or non-matching exits 12 `credential_invalid` (`details.env`), checked whole before any header or URL is built, so a mistaken variable cannot send the body elsewhere. The request goes to host `hooks.slack.com`, port 443, with the path of the validated URL.
+- All HTTP goes through gateway.py using http.client.HTTPSConnection, built from the validated host and port; urllib is not used. The gateway resolves, connects and completes the TLS handshake before the request is built (conn.connect(), then the gate of the Deadline paragraph moves to writing, then conn.request). Proxy environment variables are not read and no proxy is supported in 0.x. Redirects are never followed and a Location header is never read, printed or logged: a 3xx answer is wrong_host_response. Headers are Content-Type: application/json, Accept: application/json, Accept-Encoding: identity (http.client sends it unasked), Connection: close and User-Agent: slack-notice/<version>; the Host header is the authority as validated. HTTP debug output is never enabled and --verbose never prints a request line, a header, a URL or a response body. The body is exactly `{"<body_variable>":"<text>"}`.
+- The TLS context is ssl.SSLContext(PROTOCOL_TLS_CLIENT) with check_hostname on, CERT_REQUIRED and a minimum of TLS 1.2. Trust comes from the compiled defaults ssl.get_default_verify_paths().openssl_cafile (used when it is a regular file that loads at least one CA certificate) and .openssl_capath (used when it is an existing directory); SSL_CERT_FILE and SSL_CERT_DIR are not read. Usability can be verified only for a bundle file: a directory is loaded lazily by hashed name, so it is used as given and its contents are not checked. If the compiled cafile is not usable and the compiled capath is not an existing directory, the first regular file of /etc/ssl/certs/ca-certificates.crt, /etc/pki/tls/certs/ca-bundle.crt and /etc/ssl/cert.pem that loads at least one CA certificate is used; if none exists the send is network_error with details.tls true and a message that says no usable CA certificates were found. When the default trust is a directory only and it holds no matching certificate, the failure is a verification failure like any other: network_error with details.tls true, not retryable. A certificate chain or host name failure is network_error with details.tls true. There is no option to disable verification.
+- The response is read in chunks of at most 1 KiB until the cap of 4 KiB is reached; a body that is longer, is not valid UTF-8 or fails the hardened JSON parse of the input rules (duplicate keys, NaN, ValueError, RecursionError and OverflowError refused) is a bad body. The success form is `{"ok":true}`: a 200 whose body parses as a JSON object with `ok` equal to `true` (other keys ignored).
+- The code of a failure is chosen by the phase, which is the state of the gate alone ([Deadline](#webhook-edge) below), not by the class of the exception or the place in the library where it was raised. The gate moves to writing before the first write attempt; any exception, of any class, while the gate is idle is network_error (details.tls and details.timeout from the class). Once the gate is writing, any failure without a complete HTTP response is outcome_unknown or wrong_host_response with unknown_outcome true, whatever the exception: one that means the connection or the answer was lost (OSError, ssl.SSLError, a timeout, http.client.RemoteDisconnected, IncompleteRead) is outcome_unknown; an answer that arrives but is not HTTP (BadStatusLine, LineTooLong, UnknownProtocol and any other http.client.HTTPException) is wrong_host_response with unknown_outcome true. No exception text from http.client, ssl or socket is ever printed or logged: the exit 1 handler prints the exception class name and a fixed message only.
+- Secrets: a credential is validated whole before any header or URL is built (the URL grammar above), else exit 12 credential_invalid. A credential, or any part of it, never appears in argv, a URL printed anywhere, a log record, an error message, a verbose line or an exit 1 message.
+- `body_variable` matches `^[A-Za-z_][A-Za-z0-9_]{0,63}$`.
+
+**Deadline.** Config timeout is one monotonic deadline for the whole send, counted from the start of input reading (step 3) to the end of step 6. It covers reading input, waiting for the send lock, name resolution, connecting, TLS, writing the request, reading the response and retry waits. Input is read by the main thread in slices ([Input](#notification)). The network phase runs in a daemon worker thread. A gate with three states, idle, writing and abandoned, and a result slot, both guarded by one lock, decide who wins. The worker connects (name resolution, TCP, TLS) while the gate is idle. Every attempt (the first, a retry after a 429 and a retry after a failed connection) takes the same step: immediately before its first call that can put request bytes on the socket it takes the lock and moves the gate from idle to writing, and it does nothing if the gate is abandoned. After a fully read 429 response nothing was accepted, so the worker moves the gate back from writing to idle under the lock before it waits and tries again; a failure that is not a complete HTTP response after the gate entered writing is never moved back. The worker stores each result in the slot under the same lock: a final result (a complete response that ends the send) ends it, and a result that will be retried (a 429, a connection failure) is kept as the last result. At the deadline the main thread takes the lock and first looks at the slot: a final result that is there wins over the deadline, so a response that is complete at the deadline is used as it is. Otherwise, if the gate is idle it becomes abandoned and the result is the code of the last result (rate_limited with retry_after_s, or exit 12 network_error with retryable true and details.timeout true when there was none), or unavailable when the send lock or the input was being waited for; if the gate is writing the result is exit 12 outcome_unknown. The worker closes its socket when it finds the gate abandoned. Then the main thread prints the result and flushes it, writes the log record and ends the process with os._exit; the worker is never joined. The worker's body catches BaseException and hands it to the main thread as an exit 1 internal error (the class name only); threading.excepthook prints nothing. An exit 1 after the gate moved to writing is logged, as outcome_unknown ([Log](#log)). A wait (a retry wait or the lock wait) that is longer than the time that remains ends the send at once with the code of the last result, without sleeping.
+
+A deadline that passes while input is read ends the send with exit 12 `unavailable`, `details.phase` `input`, retryable true and unknown_outcome false: nothing was sent.
+
+SIGINT, SIGTERM and SIGHUP are handled once. A signal that arrives before step 5 (including during input and in a dry run) exits 128+N with no envelope and no output, sends nothing and writes no log record; the sender of the signal knows. From step 5 on the handler records that the deadline has passed, which the main thread notices within 100 ms (the lock poll, the wait on the worker); later signals are ignored while the result is reported. The result is the one of the phase the send was in: unavailable during the lock wait, otherwise as at the deadline (a signal while the gate is writing is outcome_unknown). The result is printed no later than the deadline plus 1 s, and the process ends no later than the timeout plus 3 s (the log step is bounded by one second of lock polling, [Files](#files)). A caller kills no earlier than the timeout plus 10 s.
+
+Status to code mapping (the flags of each code are in [Error envelope](#error-envelope)):
+
+| Response | Result |
+|---|---|
+| 200 with the success form | `sent` (exit 0). |
+| Any 2xx other than the success form, including a 200 whose body is not the success form | Exit 12 `wrong_host_response` with `unknown_outcome` true. |
+| 400 | Exit 12 `host_rejected`; `details.host_error` is the string value of the response's key `error` when it matches `[a-z_]{1,64}`, else null; `details.http_status` 400. |
+| 401, 403, 404, 410 | Exit 12 `auth_required` with `details.http_status`; the message says to regenerate the trigger URL. Only 401 `invalid_auth` was seen in testing; 403, 404 and 410 are assumed. |
+| 429 | Retried (below); then exit 12 `rate_limited`. |
+| 5xx | Exit 12 `upstream_error` with `unknown_outcome` true; not retried. |
+| 3xx, and any other status not listed | Exit 12 `wrong_host_response` with `unknown_outcome` false. |
+| Failure while the gate is idle, before the first write attempt (name resolution, connection refused or timed out, TLS handshake failure) | Retried once (below); then exit 12 `network_error`. A certificate verification failure is not retried and has `details.tls` true. |
+| Any failure once the gate is writing and no complete HTTP response arrived (timeout, reset, early end of the response) | Exit 12 `outcome_unknown`; never retried. |
+
+429 is retried up to twice, after 2 s and then 4 s; the Retry-After header is never read. A failure while the gate is idle (name resolution, connection refused or timed out, a TLS handshake failure that is not a certificate verification failure) is retried once after 2 s. The two counters are independent: at most two 429 retries and at most one connection retry per send, all inside the deadline. A wait longer than the time left in the deadline ends the send at once with the code of the last result (rate_limited with retry_after_s set to that wait, or network_error). Nothing else is retried: a 5xx is upstream_error with unknown_outcome true, and any failure once the gate is writing without a complete HTTP response is outcome_unknown. Any 2xx other than the success form, including a 200 whose body is not the success form, is wrong_host_response with unknown_outcome true; any other status that is not listed is wrong_host_response with unknown_outcome false.
+
+The log outcome is outcome_unknown whenever the envelope's unknown_outcome is true (also for an exit 1 after the gate moved to writing), and failed for any other exit 12.
+
+A throttled request is answered 429, not success; what Slack drops silently with a success status is an oversized body or a misnamed variable. Exit 0 means only that Slack accepted the request. Output says `sent`, never `delivered`.
+
+## Output
+
+Global flags may appear before or after the subcommand. Flags are exact: abbreviations of long options are not accepted, and --flag=value is the same flag as --flag value (a value that starts with - must use the = form). stdout and stderr are written as UTF-8 bytes with errors replaced, never through the locale. The result is printed and flushed to stdout and stderr before the log step. After step 6 a failure to write (BrokenPipeError or any OSError) is ignored and the process ends with the exit code of the result after one flush attempt of each stream. The tool looks for --json in argv before it parses anything, so a usage error with --json prints the envelope (code usage) on stdout; --help and --version are exempt. Errors always print one line on stderr; with --json they also print the error envelope on stdout. With --json a successful send prints one object on stdout; without it human text goes to stderr and stdout is empty (a dry run prints the rendered text on stderr). A disabled tool prints {"outcome":"disabled"} on stdout with --json and one line on stderr without it, and exits 22 either way. stderr is advisory (warnings, verbose lines); the contract is the exit code plus the stdout JSON.
+
+Without --json the human lines on stderr are fixed: "sent (<level>, <duration_ms> ms)" for a send, the rendered text for a dry run, "disabled in config", and "<code>: <message>" for an error ("refused (<reason>): <message>" for exit 20). They contain no title, message, link, dedupe key or other input-derived text. --quiet suppresses every stderr line except errors and warnings; --verbose adds one line per phase (input, render, send, log) with the elapsed milliseconds and never a request line, header, URL, host, body or credential.
+
+With `--json`, `send` prints one object ([schemas/cli/send.json](../schemas/cli/send.json)): `{outcome, tool, level, truncated, bytes, duration_ms, http_status, dedupe_key, rendered}`. `outcome` is `sent`, `dry_run` or `disabled`; a disabled run prints only `{"outcome": "disabled"}`. `http_status` is null for a dry run; `dedupe_key` echoes the caller's own `--dedupe-key` (or null); `rendered` (the body string, no secrets) is present only for a dry run.
+
+Every JSON document that the tool sends, hashes or measures is serialized with json.dumps(obj, ensure_ascii=False, separators=(",", ":")), keys in the order given in this document, and encoded as UTF-8. bytes in the output and the log is the length of the request payload in that form (the request body, `{"<body_variable>":"<text>"}`).
 
 ## Exit codes
 
-To be specified. Reserved codes are defined in the design guide §4.2
-(`../../awkit-docs/design-guide.md`); tool-specific codes (22+) and refusal reasons are listed here.
+Codes 0 to 21 follow design guide section 4.2. Exit 0: sent or a dry run. Exit 1: internal error. Exit 2: usage or invalid configuration (codes usage, config_invalid). Exit 12: failed for a reportable reason (the codes of the tool, below). Exit 128+N: the process received signal N before step 5 and ended with no envelope and no output. Exit 20: refused before sending because of the payload; code refused with a required reason. Exit 22: nothing sent because the tool is disabled in config (not an error; output {"outcome":"disabled"}). Exits 10, 11, 13 and 21 are never used: the tool stores no objects, has no hooks and never prompts. A caller treats exit 22 as a successful no-op.
 
-## `--json` outputs
+| Exit | Meaning | Codes (reasons for exit 20) |
+|---|---|---|
+| 0 | Accepted by Slack (`sent`) or a dry run. | |
+| 1 | Internal error. | `internal` |
+| 2 | Usage or invalid configuration. | `usage`, `config_invalid` |
+| 12 | Failed for a reportable reason (`unavailable`: nothing was sent because the lock wait or the input read outlasted the deadline). | `host_rejected`, `auth_required`, `credential_invalid`, `rate_limited`, `upstream_error`, `network_error`, `outcome_unknown`, `wrong_host_response`, `unavailable` |
+| 20 | Refused before sending because of the payload: `code` is `refused`, `reason` required. | Reasons: `invalid_payload`, `empty_message`, `link_invalid`, `link_scheme` |
+| 22 | Nothing sent: the tool is disabled in config. | `disabled` |
 
-To be specified. Each output is described by a schema in [`schemas/cli/`](../schemas/cli/).
+Exit 20 means only that the payload was refused: a producer fault, never retried (a stalled producer is exit 12 `unavailable`, not exit 20). An environment fault (no usable credential) is an exit 12 code, so a router has one rule: 20 drop and surface, 12 look at `retryable` and `unknown_outcome`, 22 no-op. A state-directory problem is never an error ([Files](#files)).
+
+### Error envelope
+
+The error envelope is {"error": {"code", "message", "reason", "details", "retryable", "retry_after_s", "unknown_outcome"}} ([schemas/cli/error.json](../schemas/cli/error.json)); only code and message are required and the other keys are present with null when they do not apply. message is a fixed string of the tool, never a response body, header, exception text or input value. reason is set only on exit 20. retry_after_s is set only for rate_limited (the wait that was last performed, or the wait that did not fit the deadline; it is the tool's own backoff, not a server hint). retryable means that sending the same notification again is safe. unknown_outcome means that the notification may already have been delivered. They are set as follows.
+
+- Exit 2 and exit 20: retryable null, unknown_outcome null.
+- Exit 1: retryable false; unknown_outcome true when the failure happened after the gate moved to writing, else false. The envelope on exit 1 is best effort: exit 1 with no envelope means the outcome is unknown.
+- Exit 12: both are booleans, set per code: not sent and permanent (false, false): host_rejected, auth_required, credential_invalid, and wrong_host_response for a status that is not 2xx; not sent and worth retrying (true, false): rate_limited, unavailable, network_error (false, false when details.tls is true); possibly delivered (false, true): outcome_unknown, upstream_error, and wrong_host_response after a 2xx or after an answer that is not HTTP.
+
+details by code or reason, null when none applies: config_invalid: key (a config key name matching [A-Za-z0-9_]{1,64}, else `?`; `--config` for a missing --config file; `home` for a home directory that cannot be used; or the file path for a file that cannot be read or parsed); reason invalid_payload: pointer; unavailable: phase (`input` or `lock`); credential_invalid: env; every code that came from a response (auth_required, host_rejected, rate_limited, upstream_error, wrong_host_response): http_status; host_rejected also host_error; network_error: tls, timeout. A message never contains an input value or a credential, and no stderr line contains input-derived text.
 
 ## Hooks
 
-To be specified (names, when they fire, payload schema links under
-[`schemas/hooks/`](../schemas/hooks/)).
+None in 0.x. slack-notice sends one message and takes no policy decisions; gating and routing belong to the caller (a producer's hooks, or its caller). A `post-send` hook that itself notifies on failure could call this tool again and loop, which is the other reason there are none. Adding hooks later is additive.
+
+## Calling from automation
+
+Canonical call: slack-notice send --stdin-json --json --actor auto:<name> [--dedupe-key=<hex>], the payload on stdin, absent fields omitted (never null). A caller that has a key passes a hex digest of it with the = form, never the raw id. Decide by exit code:
+
+| Exit | Meaning | Caller action |
+|---|---|---|
+| 0 | sent | Record it. |
+| 22 | disabled, a successful no-op | Nothing. A shell caller writes `rc=$?; [ "$rc" = 22 ] && rc=0`. |
+| 20 | the payload was refused | Do not retry; surface once per reason. After link_invalid or link_scheme a caller may retry once without link, putting the URL in the message. |
+| 12 (false, false) | not sent; `host_rejected`, `auth_required` and `credential_invalid` need a person to change the config or the credential; `wrong_host_response` after a status that is not 2xx may be transient | Do not retry; surface once per code and destination. For `wrong_host_response` a router may retry later under the same cap as the next row. |
+| 12 (true, false) | not sent, worth retrying (`rate_limited`, `network_error`, `unavailable`, including `unavailable` with `details.phase` `input`) | Retry later with the caller's own backoff and one cap (`rate_limited` has already waited 2 s and 4 s inside the deadline, `network_error` 2 s once and `unavailable` only for the lock or the input; retry_after_s is the tool's own wait, not a server hint). |
+| 12 (false, true) | possibly delivered | Do not retry; record it as possibly sent. A persistent 2xx with a bad body (`wrong_host_response`) means the URL is not a trigger URL. |
+| 128+N | the tool was stopped by signal N before the send started | Nothing was sent; the caller that sent the signal knows. |
+| 2, 1 | a usage or config fault, or an internal error | Do not retry; surface as a fault of the deployment. Exit 1 with no envelope: the outcome is unknown. |
+
+The caller must prevent what refuses a payload: cut title and message to at most 100000 characters, always supply a non-empty message (copy the title into it if needed), use one of the four levels, and percent-encode links and give hosts as punycode. The caller kills the tool no earlier than its timeout plus 10 s (the tool prints its result within 1 s of the deadline and ends within 3 s of it); a caller that kills the tool gets no envelope and treats the outcome as unknown; SIGTERM is preferred (before the send starts it ends the tool with 128+N, afterwards the tool treats it as the deadline). The tool may exit without reading all of stdin, so a caller ignores EPIPE and SIGPIPE on the stdin write and decides by the exit code alone. The tool serializes the sends of one machine for you up to its deadline, but the lock is not fair and a waiter that outlasts the deadline, or a producer that stalls, gets exit 12 unavailable (retryable), so a caller still sends one notification at a time. To send to several destinations use one config file per destination with --config. --config and --file choose which files the tool reads and, through the config, where it sends; no rule on the command text can make that safe, because the environment of the process is trusted, so an agent that must not choose a destination does not call the tool: it calls the caller's router. Spacing and the log depend on a usable state directory; a state problem only warns on stderr, so a caller that must have spacing serializes on its own. A doctor runs slack-notice validate --json [--config <path>], reads enabled, and treats a failed credential check of a tool with enabled false as information.
 
 ## Config
 
-To be specified (keys and defaults; see [`schemas/config.json`](../schemas/config.json)).
+Config is read from .config/slack-notice/config.yaml under the user's home directory from the password database (pwd.getpwuid(os.getuid()).pw_dir); HOME and XDG_CONFIG_HOME are not read. The lookup is made once, at the start of step 2, for every run except `send --dry-run` with `--config` (which needs no home directory). If the lookup fails, or the home it returns is empty, relative or not an existing directory, the tool exits 2 config_invalid (`details.key` `home`) before it reads input or sends anything; there is no HOME or XDG fallback. --config <path> reads that file instead. Drop-ins are config.d/*.yaml in the directory that holds the config file, in lexical order; maps merge. A missing default config file means defaults; a missing file named by --config exits 2 config_invalid with details.key "--config". Files must be at most 65536 bytes and regular files (a file is opened with O_NONBLOCK, symlinks are followed and the opened descriptor is checked, so a FIFO named as a config file never blocks), and are parsed with a strict YAML loader (PyYAML safe_load through a SafeLoader subclass that refuses a duplicate mapping key and keeps only true and false as booleans and only decimal integers and decimal fractions (such as `1.5`) as numbers, so no, off, yes, 010, 1:30, 0x10, 1_0, .inf and .nan stay strings and fail the type check); the top level must be a mapping. A file that cannot be read, a duplicate key, a YAML or parser error of any kind, RecursionError or MemoryError while loading, merging or validating, exits 2 config_invalid with details.key set to the file path and a fixed message: the YAML error text (it quotes the file) and every value are never printed. Merging and validation look only at known keys: an unknown key is refused before its value is examined. Booleans are only the YAML booleans true and false; a boolean is never accepted for a number, and a number must be finite. There are no environment overrides and no per-repo override: precedence is flags, then config, then defaults, and the environment variable that holds a credential is named by the config key shown in the table; it is the only variable the tool reads for a secret. Validation messages are built from the key and the rule only (Pydantic's input value is never used).
+
+Durations (timeout and others) are a number of seconds (a decimal integer or decimal fraction), or a string matching `[0-9]+(\.[0-9]+)?(ms|s|m)?` (no unit means seconds); each key has its own default and range; no key constrains another. The tool enforces the range of each key at load with a check that is false for NaN (lo <= x <= hi). Invalid config exits 2 config_invalid, details.key naming the key; a message names the key and the rule and never the value (for a name key that looks like a URL it says "must be a variable name").
+
+Schema: [schemas/config.json](../schemas/config.json); example: [config.example.yaml](../config.example.yaml). The `webhook_env` name matches `^[A-Za-z_][A-Za-z0-9_]{0,127}$`.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` makes `send` exit 22 without reading input or the credential. |
+| `webhook_env` | `SLACK_WEBHOOK` | Name of the environment variable holding the trigger URL (the URL itself is never in config). |
+| `body_variable` | `body` | Name of the workflow's text variable. |
+| `level_prefix` | `{info: "🔵 INFO", warn: "🟠 WARN", action: "🟡 ACTION", error: "🔴 ERROR"}` | One-line prefixes, 1 to 16 characters each; run through the title rule (sanitizer steps 1 to 5) and must come out unchanged, else `config_invalid`. |
+| `max_chars` | `3000` | Body limit in code points, 2000 to 12000 (a 12000-byte cap on the request body also applies). |
+| `timeout` | `10s` | The one deadline of a `send` ([Webhook edge](#webhook-edge)), including waiting for the lock and retries, 3s to 120s. |
+| `log` | `true` | `false` writes no `log.jsonl`. |
 
 ## Environment variables
 
-To be specified.
+- The variable named by `webhook_env` holds the credential. Under cron or any hook, that variable must be in the calling process's environment; the docs recommend a mode-0600 env file sourced by the cron line. slack-notice never reads shell startup files or secret files itself.
+- No other variable is read. In particular no variable selects the config or the state directory (HOME, XDG_CONFIG_HOME and XDG_STATE_HOME are not read; both locations come from the password database), and there are no `SLACK_NOTICE_*` overrides. Proxy variables, `SSL_CERT_FILE` and `SSL_CERT_DIR` are not read.
+
+## Log
+
+The log lives in the state directory ([Files](#files)); one record per outcome that reaches `send` step 3 or later ([schemas/log.json](../schemas/log.json)): `{ts, tool, version, outcome, exit, code, reason, level, bytes, truncated, duration_ms, http_status, message_sha256, dedupe_key_sha256, actor, actor_source}`. All fields are always present. ts is UTC, YYYY-MM-DDTHH:MM:SS.mmmZ.
+
+log.jsonl holds one record per outcome that reaches step 3 or later. Not logged: exit 1 before the gate moved to writing, exit 2, exit 22, a signal that ends the tool before step 5 (128+N) and dry runs. An exit 1 after the gate moved to writing is logged, best effort within the log bound, as outcome outcome_unknown with exit 1, code internal and unknown_outcome true. A write takes an exclusive flock on log.lock, polled without blocking every 20 ms for at most 1 s (if the lock is not obtained, the record is skipped with the same warning), rotates when the file is 1 MiB or more (log.jsonl.2 to .3, .1 to .2, log.jsonl to .1), reopens log.jsonl after a rotation, and appends the record with one write of less than 1 KiB. The log step comes after the result was printed and flushed, is outside the deadline, is bounded as stated (one second of lock polling), and a log write failure (including a full disk or a timeout) warns on stderr and never changes the exit code. config log false writes nothing.
+
+outcome is sent (exit 0), refused (exit 20), outcome_unknown (exit 12 whenever the envelope's unknown_outcome is true, or exit 1 after the gate moved to writing, with code internal) or failed (any other exit 12; `unavailable` with details.phase input is failed). code is refused for exit 20, the error code for exit 12 and for exit 1, and null on success; reason is the refusal reason for exit 20 and null otherwise. actor_source is flag, tty or default. duration_ms (integer, never null) is the time from the start of step 3 to just before the log write. Nullable and always present: level (null when no valid level was read), bytes, truncated and message_sha256 and dedupe_key_sha256 (null for a refusal before rendering, or when not computed), http_status (null unless a response arrived). Records never contain a title, message, link, URL, base URL, service, host or credential. There is no audit file: a notification changes nothing in a system of record.
+
+message_sha256 is the first 16 hex characters of the SHA-256 of the UTF-8 bytes of the sanitized title (empty string when absent), a LF, and the sanitized message, before any cut, prefix or link. dedupe_key_sha256 is the first 16 hex characters of the SHA-256 of the key's UTF-8 bytes. Both are null when not computed (a refusal before the text was sanitized, or no key). bytes is the length of the request body.
+
+## Files
+
+| Path | Content |
+|---|---|
+| `.config/slack-notice/config.yaml`, `config.d/*.yaml` (under the home directory) | Config. |
+| `<state directory>/log.jsonl` (and `.1` to `.3`) | Log records. |
+| `<state directory>/log.lock` | Lock taken while a log record is written and the log rotated. |
+| `<state directory>/send.lock` | Send spacing lock; its size is 0 until the first send and its modification time is the last send's start. |
+
+The state directory is .local/state/slack-notice under the home directory from the password database (a home directory that cannot be used is exit 2 at step 2, [Config](#config)); no environment variable selects it. It is created with mode 0700, opened with O_DIRECTORY and O_NOFOLLOW, and checked on that descriptor to be owned by the user with no group or other permissions. Every file below it is opened relative to that descriptor (dir_fd) with O_NOFOLLOW, O_NONBLOCK and O_CLOEXEC (the log also with O_APPEND and mode 0600) and must be a regular file on fstat; a FIFO, a symlink or a device makes the state unusable instead of blocking the tool. It is used only when it is needed (a log record, the send lock). If it cannot be used the tool warns once on stderr, writes no log record, takes no lock, and the exit code is unchanged: a state problem never blocks or fails a send. send.lock is released at the end of step 6, before the log record is written. There is no database and no migration.
 
 ## Labels
 
-To be specified.
+slack-notice creates no long-lived objects and takes no labels.
 
 ## TUI
 
-To be specified.
+None in v1.
+
+## Residual risks
+
+- **Silent drops.** Slack answers a request with a wrong variable name, a missing variable, an oversized body or an empty object with success and delivers nothing (a throttled request is answered 429 instead). The tool prevents the cases it can (its own limits, a non-empty body, a fixed variable name) but cannot see a misnamed `body_variable`; `validate --test-message` relies on a human looking.
+- **No delivery confirmation and no deduplication.** Exit 0 means Slack accepted the request. A resend after `outcome_unknown` or a 5xx can send the message twice; the envelope says so (`unknown_outcome: true`) and is not retryable.
+- **The URL is a bearer secret.** Any process of the same user that can read the environment variable or the file it came from can post to the workflow. The workflow's failure notices (for example for an oversized body) go to the workflow's owner, not to the caller.
+- **Throttling is shared.** Spacing covers one machine; other machines or tools using the same workflow share Slack's limit, and throttled requests are lost.
+- **Plain text only.** No formatting, no clickable `<url|label>` links and no mentions are produced by anything in the text; Slack auto-links any bare URL in the text, whether it came from `link`, `message` or `title` (spike A F4), and `<url|label>` is not interpreted. `:shortcode:` text may become an emoji.
+- **Limits.** Whether the server counts characters or bytes for non-ASCII text is unverified ([design.md](design.md), Live verification); the 12000-byte cap keeps either reading safe.
+- **Level is advisory.** The prefix does not authenticate the sender: a producer can write `ERROR:` in a title.
+- **The environment is trusted.** Interpreter and loader variables (`PYTHONPATH`, `LD_PRELOAD`, `OPENSSL_CONF`) run code in the tool with the credential in reach; the tool closes the variables it reads itself (proxy, CA, key log, the config path, `SLACK_NOTICE_*`) but a caller that can set the environment of the process is inside the trust boundary.
+- **`--config` selects the destination.** The file it names holds the variable name and the body variable; no rule on the command text prevents it.
+- **Same-user threat boundary.** A process that can write the user's config or `config.d` can redirect the tool; the state directory is checked but the config is trusted.
+- **Log hash.** `message_sha256` is a 64-bit unsalted hash; a short message can be confirmed against the log by a reader of the 0600 file.
+- **Silencing.** A drop-in or the config can disable the tool (exit 22, one stderr line, nothing logged); a user who relies on it for alerts should check `validate`, which reports `enabled`.
+- **No proxy, no custom CA.** Proxy variables, `SSL_CERT_FILE` and `SSL_CERT_DIR` are not read in 0.x, so a machine that can reach Slack only through a proxy or an inspecting gateway cannot use the tool.
+- **Not supported in 0.x:** posting as a person or into a self-conversation, formatted messages (these need an app with a token), the classic incoming webhook, and the Slack CLI (its `slack api` command takes text only in argv, logs it in plaintext, exits 0 on API errors, and its login token cannot post).
+
+## Platform notes
+
+Linux and WSL are required. macOS is expected to work (standard library plus the config parser) but is not a required platform. Windows native is not supported.

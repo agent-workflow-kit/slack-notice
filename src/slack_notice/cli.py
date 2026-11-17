@@ -11,7 +11,7 @@ from slack_notice import __version__
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="slack-notice",
-        description="Send a notification to Slack via an incoming webhook.",
+        description="Send one plain-text notification to Slack through a workflow webhook trigger.",
     )
     parser.add_argument("--version", action="version", version=f"slack-notice {__version__}")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")

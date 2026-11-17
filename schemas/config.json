@@ -1,12 +1,92 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "slack-notice/config",
+  "$id": "slack-notice/config.json",
   "title": "slack-notice config",
-  "type": "object",
-  "properties": {
-    "hooks": {
-      "type": "object"
+  "description": ".config/slack-notice/config.yaml under the home directory from the password database (HOME and XDG_CONFIG_HOME are not read; an unusable home directory is exit 2 with key home) plus config.d/*.yaml beside it in lexical order. Invalid config exits 2 (config_invalid), naming the key. Drop-ins: maps merge. Precedence: flags, then config, then defaults; there are no environment overrides. Files are parsed with a strict YAML loader (duplicate keys and hex, octal, sexagesimal and .inf/.nan numbers refused), regular files of at most 65536 bytes. Self-contained: no external references.",
+  "$defs": {
+    "duration": {
+      "anyOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m)?(?![\\s\\S])"
+        }
+      ],
+      "description": "Seconds as a positive finite number, or a string matching [0-9]+(\\.[0-9]+)?(ms|s|m)? (no unit means seconds); zero is refused. Booleans are never accepted. Ranges are enforced by the loader and named in the key's description."
     }
   },
-  "additionalProperties": true
+  "type": "object",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "false makes send exit 22 without reading input or the credential."
+    },
+    "webhook_env": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}(?![\\s\\S])",
+      "default": "SLACK_WEBHOOK",
+      "description": "Name of the environment variable holding the trigger URL. The URL itself is never in config."
+    },
+    "body_variable": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}(?![\\s\\S])",
+      "default": "body",
+      "description": "Name of the workflow's text variable."
+    },
+    "level_prefix": {
+      "type": "object",
+      "properties": {
+        "info": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}(?![\\s\\S])",
+          "default": "🔵 INFO"
+        },
+        "warn": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}(?![\\s\\S])",
+          "default": "🟠 WARN"
+        },
+        "action": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}(?![\\s\\S])",
+          "default": "🟡 ACTION"
+        },
+        "error": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}(?![\\s\\S])",
+          "default": "🔴 ERROR"
+        }
+      },
+      "additionalProperties": false,
+      "default": {
+        "info": "🔵 INFO",
+        "warn": "🟠 WARN",
+        "action": "🟡 ACTION",
+        "error": "🔴 ERROR"
+      },
+      "description": "One-line prefixes, 1 to 16 characters each; a value that the title rule (sanitizer steps 1 to 5) would change is config_invalid at load."
+    },
+    "max_chars": {
+      "type": "integer",
+      "minimum": 2000,
+      "maximum": 12000,
+      "default": 3000,
+      "description": "Body limit in Unicode code points; a 12000-byte cap on the request body also applies."
+    },
+    "timeout": {
+      "$ref": "#/$defs/duration",
+      "default": "10s",
+      "description": "The one monotonic deadline of a send (input, lock wait, network, retries), 3s to 120s."
+    },
+    "log": {
+      "type": "boolean",
+      "default": true,
+      "description": "false writes no log.jsonl."
+    }
+  },
+  "additionalProperties": false
 }

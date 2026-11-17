@@ -1,4 +1,38 @@
-# Example config for slack-notice. Location: ~/.config/slack-notice/config.yaml (drop-ins: config.d/*.yaml).
-# Keys are defined in docs/interface.md once designed.
-# webhook_env: ...
-hooks: {}
+# slack-notice example config: every key with its built-in default.
+# Location: .config/slack-notice/config.yaml under your home directory (from the password database; HOME and
+# XDG_CONFIG_HOME are not read; a home that cannot be used is exit 2), plus config.d/*.yaml beside it in lexical order; --config <path> reads another
+# file (drop-ins are read from the directory of that file).
+# Drop-ins: maps merge. Files are parsed with a strict YAML loader (so no, off, yes, 010, 1:30 and 0x10 stay strings;
+# a duplicate key is an error) and must be regular files of at most 64 KiB.
+# Precedence: flags, then config, then defaults. There are no environment overrides.
+# Durations: a number of seconds, or a string such as "10s" or "1m" (no unit means seconds);
+# zero is refused. The tool enforces each key's range at load (exit 2 config_invalid, details.key).
+# Schema: schemas/config.json. Invalid config exits 2 (config_invalid), naming the key.
+
+# false makes send exit 22 (nothing sent) before any input or the credential is read.
+enabled: true
+
+# Name of the environment variable that holds the workflow trigger URL. The URL is a secret and is
+# never written here; put it in a mode-0600 env file that your shell or cron line sources.
+webhook_env: SLACK_WEBHOOK
+
+# Name of the one text variable your Slack workflow declares.
+body_variable: body
+
+# One-line prefix for each level, 1 to 16 characters each; the sanitizer must leave it unchanged.
+level_prefix:
+  info: "🔵 INFO"
+  warn: "🟠 WARN"
+  action: "🟡 ACTION"
+  error: "🔴 ERROR"
+
+# Body limit in characters (2000 to 12000). A 12000-byte cap on the request body also applies.
+# A longer message is cut and ends with "…[truncated]".
+max_chars: 3000
+
+# The one deadline of a send, covering input, waiting for the send lock, the request and retries (3s to 120s).
+timeout: 10s
+
+# false writes no log.jsonl (in the state directory).
+# Dry runs, exit 2, exit 22 and an exit 1 before a request was started are never logged.
+log: true
