@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/cli/error.json",
   "title": "Error envelope (any command with --json)",
-  "description": "Printed on stdout for a non-zero exit with --json. Exit 20 has code refused with reason set; retryable, retry_after_s and unknown_outcome are set on exit 12 and null elsewhere.",
+  "description": "Printed on stdout for a non-zero exit with --json. Exit 20 has code refused with reason set; unavailable has reason locked; retryable, retry_after_s and unknown_outcome are set on exit 12 and null elsewhere.",
   "type": "object",
   "properties": {
     "error": {

@@ -9,7 +9,7 @@
       "type": "string",
       "x-untrusted": true,
       "maxLength": 100000,
-      "description": "Untrusted. One line (newlines become spaces); at most 256 characters after sanitizing."
+      "description": "Untrusted. One line (newlines become spaces); at most 256 characters after sanitizing, cut with an ellipsis and truncated: true when longer (not refused). Input over 100000 characters exits 20 invalid_payload."
     },
     "message": {
       "type": "string",
@@ -27,7 +27,7 @@
       "x-untrusted": true,
       "maxLength": 1024,
       "pattern": "^https?://[^\\x00-\\x20\\x7f/?#@]+(?:[/?#][^\\x00-\\x20\\x7f]*)?$",
-      "description": "Untrusted. An http or https URL with no whitespace or control characters and no userinfo. Another scheme exits 20 link_scheme; any other violation exits 20 link_invalid."
+      "description": "Untrusted. Checks only the syntactic gate: http or https, no userinfo, no whitespace or control characters, at most 1024 characters. The tool, not the schema, names a violation: another scheme exits 20 with reason link_scheme, any other violation reason link_invalid."
     }
   },
   "required": [

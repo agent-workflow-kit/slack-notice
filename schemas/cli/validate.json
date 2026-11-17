@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/cli/validate.json",
   "title": "validate --json output",
-  "description": "Printed by validate. With --probe a successful test message adds outcome sent and delivery_not_observable: Slack accepts a request with a wrong variable name and drops it, so a human must look in Slack.",
+  "description": "Printed by validate when the config loads (an unloadable config prints the error envelope and exits 2). ok false is printed with the exit code of the first failing check (20 refused, 2 config_invalid, 12). With --probe the document has probe {sent, delivery_not_observable}: Slack accepts a request with a wrong variable name and drops it, so a human must look in Slack.",
   "type": "object",
   "properties": {
     "ok": {
@@ -33,13 +33,24 @@
         "additionalProperties": false
       }
     },
-    "outcome": {
-      "const": "sent",
-      "description": "--probe only, on success."
-    },
-    "delivery_not_observable": {
-      "const": true,
-      "description": "--probe only, on success."
+    "probe": {
+      "type": "object",
+      "description": "--probe only.",
+      "properties": {
+        "sent": {
+          "type": "boolean",
+          "description": "True when Slack accepted the test message."
+        },
+        "delivery_not_observable": {
+          "const": true,
+          "description": "Always true: a human must look in Slack."
+        }
+      },
+      "required": [
+        "sent",
+        "delivery_not_observable"
+      ],
+      "additionalProperties": false
     }
   },
   "required": [
@@ -76,22 +87,25 @@
     {
       "if": {
         "properties": {
-          "outcome": {
-            "const": "sent"
+          "probe": {
+            "properties": {
+              "sent": {
+                "const": false
+              }
+            },
+            "required": [
+              "sent"
+            ]
           }
         },
         "required": [
-          "outcome"
+          "probe"
         ]
       },
       "then": {
-        "required": [
-          "delivery_not_observable",
-          "ok"
-        ],
         "properties": {
           "ok": {
-            "const": true
+            "const": false
           }
         }
       }

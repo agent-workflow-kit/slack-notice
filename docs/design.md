@@ -12,7 +12,7 @@ L1 primitive: send one plain-text notification to Slack through a Slack workflow
 |---|---|---|---|
 | Slack workflow webhook trigger over HTTPS | L0 third party | none (not an edge of the tool graph) | One POST; see [Webhook edge](interface.md#webhook-edge). |
 | Python standard library HTTP client | L0 | none | No third-party HTTP dependency. |
-| Pydantic (config validation) | library | none | Required by the design guide for config; the only third-party runtime dependency. |
+| Pydantic (config validation) | library | none | Required by the design guide for config; the only third-party runtime dependency. The scaffold's `pyproject.toml` lists none yet; adding it is part of stage 2. |
 
 No tool dependencies: slack-notice composes nothing.
 
@@ -24,7 +24,7 @@ No tool dependencies: slack-notice composes nothing.
 | D-2 | Common input contract: `title`, `message`, `level`, `link`; unknown fields refused; text from stdin, a file or flags, all sanitized alike. See [Notification](interface.md#notification). | Architecture 13.2 rule 2; the design guide treats short argv text as untrusted (S-3). |
 | D-3 | One transport in 0.x: the workflow trigger, plain text in one variable. See [Transport](interface.md#transport). | The user cannot create a Slack app, so the Web API, the classic webhook and the Slack CLI's tokens are out; the spikes below show why (S-5). |
 | D-4 | Body layout `<prefix> <title>` / message / bare link, no escaping, own length limit with a visible marker. See [Rendering](interface.md#rendering), [Sanitizer](interface.md#sanitizer). | Slack parsed no markup, mention or `<url\|label>` link in the variable; entities showed literally; oversized bodies are dropped with a success status (spike A). |
-| D-5 | Exit codes and outcomes as in [Exit codes](interface.md#exit-codes); exit 22 for a disabled tool; `unknown_outcome` and no automatic retry after a timeout that follows a sent request. | A duplicate is worse than a lost message for a caller that can retry; the endpoint has no deduplication (S-7). |
+| D-5 | Exit codes and outcomes as in [Exit codes](interface.md#exit-codes); exit 20 is code `refused` with a reason; exit 22 for a disabled tool; `unknown_outcome` and no automatic retry after a timeout that follows a sent request. | A duplicate is worse than a lost message for a caller that can retry; the endpoint has no deduplication (S-7). |
 | D-6 | `config_invalid` is exit 2 (as pr-comment), not 20. | Follows the existing precedent in the design guide's exit-code table. |
 | D-7 | Webhook URL only from the environment variable named in config, shape-checked on every send (`https`, host `hooks.slack.com`, `/triggers/` path). See [Webhook edge](interface.md#webhook-edge). | Design guide section 7; the shape check stops a mistaken variable from sending the body to another host. |
 | D-8 | Send spacing by lock file, one second by default. See [Send spacing](interface.md#send-spacing). | Twelve requests in four seconds were throttled and lost (spike A). |
@@ -33,7 +33,7 @@ No tool dependencies: slack-notice composes nothing.
 
 ## Resolved open topics
 
-- Payload shape: [Notification](interface.md#notification). Invalid payloads exit 20 `invalid_payload` with a JSON pointer.
+- Payload shape: [Notification](interface.md#notification). Invalid payloads exit 20 `refused` with reason `invalid_payload` and a JSON pointer.
 - Channel config: [Config](interface.md#config). No per-repo overrides.
 - Escaping: none for this transport, by test; control and invisible characters are removed instead ([Sanitizer](interface.md#sanitizer)).
 

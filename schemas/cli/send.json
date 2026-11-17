@@ -38,7 +38,7 @@
       ],
       "minimum": 100,
       "maximum": 599,
-      "description": "null for a dry run or disabled."
+      "description": "null for a dry run; a disabled run prints only outcome."
     },
     "dedupe_key": {
       "oneOf": [
@@ -48,7 +48,8 @@
         {
           "type": "null"
         }
-      ]
+      ],
+      "description": "Echo of the caller's own --dedupe-key, or null."
     },
     "rendered": {
       "type": "string",
@@ -145,16 +146,7 @@
         ]
       },
       "then": {
-        "not": {
-          "required": [
-            "rendered"
-          ]
-        },
-        "properties": {
-          "http_status": {
-            "type": "null"
-          }
-        }
+        "maxProperties": 1
       }
     }
   ]

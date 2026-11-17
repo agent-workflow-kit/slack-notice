@@ -14,9 +14,9 @@ L1 (primitive). Works fully standalone; it does not need the `awkit` harness.
 
 - Sends a notification (`title`, `message`, `level`, `link`) as one text message. Everything is folded into the single text variable of your Slack workflow ([Rendering](docs/interface.md#rendering)).
 - Reads the notification from stdin as JSON, from a file, or, for human use, from flags. All text is sanitized the same way; control and invisible characters are removed ([Sanitizer](docs/interface.md#sanitizer)).
-- Keeps its own length limit and marks a cut with `…[truncated]`, because Slack drops an oversized message and still reports success.
+- Keeps its own length limits (a cut message ends with `…[truncated]`, a cut title with `…`), because Slack drops an oversized message and still reports success.
 - Spaces sends on one machine so Slack's throttling does not lose messages ([Send spacing](docs/interface.md#send-spacing)).
-- Keeps no database. It writes a log of what it did (never the text, the link or the URL) and a lock file. It runs no hooks and decides nothing about when to send; that belongs to the caller.
+- Keeps no database. It writes a log of what it sent, refused or failed (never the text, the link or the URL; dry runs and disabled runs are not logged) and a lock file. It runs no hooks and decides nothing about when to send; that belongs to the caller.
 
 ## The one transport
 
@@ -52,7 +52,7 @@ slack-notice send --title "Backup" --message "Finished" --level warn
 # Show the exact text that would be sent, without reading the credential or sending
 slack-notice send --file notice.json --dry-run --json
 
-# Check config and credential shape; --probe also sends one marked test message
+# Check config and credential shape; --probe also sends one marked test message (printed as probe.sent)
 slack-notice validate
 slack-notice validate --probe
 ```
@@ -70,7 +70,7 @@ Global flags: `--json`, `--config <path>`, `--dry-run`, `--actor <actor>`, `--ve
 
 ## Exit codes
 
-0 accepted by Slack (or a dry run); 2 usage or invalid config; 12 failed for a reportable reason (rejected, auth, rate limit, network, unknown outcome); 20 refused before sending with a `reason` (bad payload, empty message, bad link, missing credential); 22 nothing sent because the tool is disabled in config. A caller treats 22 as a successful no-op. See [Exit codes](docs/interface.md#exit-codes).
+0 accepted by Slack (or a dry run); 2 usage or invalid config; 12 failed for a reportable reason (rejected, auth, rate limit, network, unknown outcome); 20 refused before sending (`code: refused`) with a `reason` (`invalid_payload`, `empty_message`, `link_invalid`, `link_scheme`, `credential_missing`); 22 nothing sent because the tool is disabled in config. A caller treats 22 as a successful no-op. See [Exit codes](docs/interface.md#exit-codes).
 
 ## Limitations
 

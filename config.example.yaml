@@ -6,11 +6,12 @@
 # Environment: SLACK_NOTICE_ENABLED, SLACK_NOTICE_WEBHOOK_ENV, SLACK_NOTICE_BODY_VARIABLE,
 # SLACK_NOTICE_MAX_CHARS, SLACK_NOTICE_MIN_INTERVAL, SLACK_NOTICE_TIMEOUT and SLACK_NOTICE_LOG set
 # the matching scalar keys. level_prefix cannot be set from the environment.
-# Durations: seconds as a positive number, or <number><unit> with unit ms, s, m, h or d ("30s");
-# a bare number string ("90") means seconds; zero is refused.
+# Durations: a number of seconds, or a string such as "500ms", "10s" or "1m" (the design guide's
+# duration grammar); zero is refused. The tool enforces each key's range at load (exit 2 config_invalid,
+# details.key).
 # Schema: schemas/config.json. Invalid config exits 2 (config_invalid), naming the key.
 
-# false makes send exit 22 (nothing sent) without reading the credential.
+# false makes send exit 22 (nothing sent) before any input or the credential is read.
 enabled: true
 
 # Name of the environment variable that holds the workflow trigger URL. The URL is a secret and is
@@ -36,5 +37,5 @@ min_interval: 1s
 # Budget for one send, including waiting for the send lock and retries (1s to 120s).
 timeout: 10s
 
-# false writes no log.jsonl (~/.local/state/slack-notice/log.jsonl).
+# false writes no log.jsonl (~/.local/state/slack-notice/log.jsonl). Dry runs, exit 2 and exit 22 are never logged.
 log: true
