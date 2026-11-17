@@ -1,12 +1,101 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "slack-notice/config",
+  "$id": "slack-notice/config.json",
   "title": "slack-notice config",
-  "type": "object",
-  "properties": {
-    "hooks": {
-      "type": "object"
+  "description": "~/.config/slack-notice/config.yaml (XDG respected) plus config.d/*.yaml in lexical order. Invalid config exits 2 (config_invalid), naming the key. Drop-ins: maps merge, other lists replace. Precedence: flags, then environment (scalar keys only), then config, then defaults. Self-contained: no external references.",
+  "$defs": {
+    "duration": {
+      "anyOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)$"
+        },
+        {
+          "type": "string",
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?$"
+        }
+      ],
+      "description": "Seconds as a positive number, a string <number><unit> with unit ms, s, m, h or d (e.g. '1s'), or a bare number string meaning seconds; zero is refused. Ranges are enforced by the loader and named in the key's description."
     }
   },
-  "additionalProperties": true
+  "type": "object",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "false makes send exit 22 without reading the credential."
+    },
+    "webhook_env": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+      "default": "SLACK_WEBHOOK",
+      "description": "Name of the environment variable holding the trigger URL. The URL itself is never in config."
+    },
+    "body_variable": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$",
+      "default": "body",
+      "description": "Name of the workflow's text variable."
+    },
+    "level_prefix": {
+      "type": "object",
+      "properties": {
+        "info": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}$",
+          "default": "INFO"
+        },
+        "warn": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}$",
+          "default": "WARN"
+        },
+        "action": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}$",
+          "default": "ACTION"
+        },
+        "error": {
+          "type": "string",
+          "pattern": "^[^\\x00-\\x1f\\x7f]{1,16}$",
+          "default": "ERROR"
+        }
+      },
+      "additionalProperties": false,
+      "default": {
+        "info": "INFO",
+        "warn": "WARN",
+        "action": "ACTION",
+        "error": "ERROR"
+      },
+      "description": "One-line prefixes, at most 16 characters each. Cannot be set from the environment."
+    },
+    "max_chars": {
+      "type": "integer",
+      "minimum": 2000,
+      "maximum": 12000,
+      "default": 3000,
+      "description": "Body limit in Unicode code points."
+    },
+    "min_interval": {
+      "$ref": "#/$defs/duration",
+      "default": "1s",
+      "description": "Minimum time between sends from this machine, 1s to 60s."
+    },
+    "timeout": {
+      "$ref": "#/$defs/duration",
+      "default": "10s",
+      "description": "Budget for one send, including waiting for the lock and retries, 1s to 120s."
+    },
+    "log": {
+      "type": "boolean",
+      "default": true,
+      "description": "false writes no log.jsonl."
+    }
+  },
+  "additionalProperties": false
 }

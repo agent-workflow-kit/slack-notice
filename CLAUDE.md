@@ -1,16 +1,17 @@
 # CLAUDE.md: slack-notice
 
-slack-notice is a awkit L1 primitive: send a notification to Slack via an incoming webhook. It must work
-fully standalone (no harness, bus, shared library or shared contracts package).
+slack-notice is an awkit L1 primitive: send one plain-text notification to Slack through a Slack workflow's webhook trigger. It must work fully standalone (no harness, bus, shared library or shared contracts package).
+
+**Status.** Design done, interface 0.1.0-design; not yet implemented (see `docs/plan.md`).
 
 **Naming.** Tools have no shared prefix; see design guide §1 naming rules.
 
 ## Read first
 
-- `../awkit-docs/architecture.md`: this tool's §5.1 entry and its §20 entry (constraints and open
-  topics), plus the cross-cutting sections listed in `docs/design.md`.
-- `../awkit-docs/design-guide.md`: the conventions every awkit tool follows.
-- `docs/design.md`: this tool's design doc (decisions and open questions).
+1. `docs/interface.md`: the single normative source for this tool's rules.
+2. `docs/design.md`: decisions, modules and test strategy; `docs/plan.md`: the staged plan.
+3. `../awkit-docs/architecture.md`: this tool's §5.1 entry and its §20 entry, plus the cross-cutting sections listed in `docs/design.md`.
+4. `../awkit-docs/design-guide.md`: the conventions every awkit tool follows.
 
 ## Rules
 
@@ -21,20 +22,19 @@ fully standalone (no harness, bus, shared library or shared contracts package).
   schema files into `tests/` pinned to a version is allowed.
 - No upward awareness: this tool never knows about, or behaves differently for, the tools that
   call it.
-- Interface first: write `docs/interface.md` and `schemas/` before implementation.
+- Interface first: `docs/interface.md` and `schemas/` change before the implementation does.
 - Semver. A breaking interface change is, before 1.0, a `feat` commit whose title names the break (never `!` before 1.0), and from 1.0 on a `!` commit; the title becomes the changelog line (details go in the PR body). Either way, update `awkit-docs/interface-registry.md`. Never hand-edit CHANGELOG.md or the version.
 - Run `make verify` before every commit.
 - All subprocess and HTTP calls go through `src/slack_notice/gateway.py`.
 - Never run destructive git commands (reset, checkout --, clean, restore, stash drop,
   force-push). Never kill processes by pattern; only signal an exact PID this tool started.
+- Untrusted or agent-generated text travels only in files or stdin, never argv or env.
 - Minimize dependencies; justify each one in `docs/design.md`.
 
 ## Workflow
 
-1. Start with a design session that resolves the open topics in `docs/design.md` and records
-   the decisions there.
-2. Write `docs/interface.md` and `schemas/`.
-3. Implement test-first.
+1. Interface changes update `docs/interface.md`, `schemas/` and `config.example.yaml` together.
+2. Implement test-first, following `docs/plan.md`; schema tests validate real output with positive and negative samples.
 
 ## Repository workflow
 

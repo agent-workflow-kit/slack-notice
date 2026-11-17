@@ -1,4 +1,40 @@
-# Example config for slack-notice. Location: ~/.config/slack-notice/config.yaml (drop-ins: config.d/*.yaml).
-# Keys are defined in docs/interface.md once designed.
-# webhook_env: ...
-hooks: {}
+# slack-notice example config: every key with its built-in default.
+# Location: ~/.config/slack-notice/config.yaml (XDG_CONFIG_HOME respected), plus config.d/*.yaml in
+# lexical order; --config <path> reads another file (drop-ins are read next to it).
+# Drop-ins: maps merge, other lists replace.
+# Precedence: flags, then environment (scalar keys only), then config, then defaults.
+# Environment: SLACK_NOTICE_ENABLED, SLACK_NOTICE_WEBHOOK_ENV, SLACK_NOTICE_BODY_VARIABLE,
+# SLACK_NOTICE_MAX_CHARS, SLACK_NOTICE_MIN_INTERVAL, SLACK_NOTICE_TIMEOUT and SLACK_NOTICE_LOG set
+# the matching scalar keys. level_prefix cannot be set from the environment.
+# Durations: seconds as a positive number, or <number><unit> with unit ms, s, m, h or d ("30s");
+# a bare number string ("90") means seconds; zero is refused.
+# Schema: schemas/config.json. Invalid config exits 2 (config_invalid), naming the key.
+
+# false makes send exit 22 (nothing sent) without reading the credential.
+enabled: true
+
+# Name of the environment variable that holds the workflow trigger URL. The URL is a secret and is
+# never written here; put it in a mode-0600 env file that your shell or cron line sources.
+webhook_env: SLACK_WEBHOOK
+
+# Name of the one text variable your Slack workflow declares.
+body_variable: body
+
+# One-line prefix for each level, at most 16 characters each.
+level_prefix:
+  info: INFO
+  warn: WARN
+  action: ACTION
+  error: ERROR
+
+# Body limit in characters (2000 to 12000). A longer message is cut and ends with "…[truncated]".
+max_chars: 3000
+
+# Minimum time between sends from this machine (1s to 60s). Slack drops requests it throttles.
+min_interval: 1s
+
+# Budget for one send, including waiting for the send lock and retries (1s to 120s).
+timeout: 10s
+
+# false writes no log.jsonl (~/.local/state/slack-notice/log.jsonl).
+log: true

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "slack-notice/notification.json",
+  "title": "slack-notice notification (send --stdin-json, --file)",
+  "description": "One notification. Unknown fields exit 20 invalid_payload. Text limits are applied after sanitizing by the tool; the bounds here only cap the raw input. Flag input (--title, --message, --level, --link) forms the same object.",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "x-untrusted": true,
+      "maxLength": 100000,
+      "description": "Untrusted. One line (newlines become spaces); at most 256 characters after sanitizing."
+    },
+    "message": {
+      "type": "string",
+      "x-untrusted": true,
+      "minLength": 1,
+      "maxLength": 100000,
+      "description": "Untrusted. At most 100000 characters of input; empty after sanitizing exits 20 empty_message."
+    },
+    "level": {
+      "$ref": "defs.json#/$defs/level",
+      "default": "info"
+    },
+    "link": {
+      "type": "string",
+      "x-untrusted": true,
+      "maxLength": 1024,
+      "pattern": "^https?://[^\\x00-\\x20\\x7f/?#@]+(?:[/?#][^\\x00-\\x20\\x7f]*)?$",
+      "description": "Untrusted. An http or https URL with no whitespace or control characters and no userinfo. Another scheme exits 20 link_scheme; any other violation exits 20 link_invalid."
+    }
+  },
+  "required": [
+    "message"
+  ],
+  "additionalProperties": false
+}

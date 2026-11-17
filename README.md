@@ -1,43 +1,98 @@
 # slack-notice
 
-Send a notification to Slack via an incoming webhook.
+Sends one plain-text notification to Slack through a Slack workflow's webhook trigger.
 
 ## Status
 
-Pre-design: interface not yet specified; see [docs/design.md](docs/design.md).
+Designed (interface 0.1.0-design); not yet implemented. The normative specification is [docs/interface.md](docs/interface.md); decisions are in [docs/design.md](docs/design.md) and the staged plan in [docs/plan.md](docs/plan.md).
 
 ## Layer
 
-L1 (primitive). Works fully standalone.
+L1 (primitive). Works fully standalone; it does not need the `awkit` harness.
 
 ## What it does
 
-Delivers a notification to a Slack incoming webhook; the URL comes from the env var named by config (`webhook_env`). Takes `send --stdin-json` (a JSON object with `title`, `message`, `level`, `link`) or, for trusted human use, `send --title ... --message ...`. Levels are ordered `info < warn < action < error`. Escapes platform markup in title and message (no mentions, no link injection); links are only added via `link`/`--link`. Routing, quiet hours and dedup are notice-route's job; this tool only delivers.
+- Sends a notification (`title`, `message`, `level`, `link`) as one text message. Everything is folded into the single text variable of your Slack workflow ([Rendering](docs/interface.md#rendering)).
+- Reads the notification from stdin as JSON, from a file, or, for human use, from flags. All text is sanitized the same way; control and invisible characters are removed ([Sanitizer](docs/interface.md#sanitizer)).
+- Keeps its own length limit and marks a cut with `…[truncated]`, because Slack drops an oversized message and still reports success.
+- Spaces sends on one machine so Slack's throttling does not lose messages ([Send spacing](docs/interface.md#send-spacing)).
+- Keeps no database. It writes a log of what it did (never the text, the link or the URL) and a lock file. It runs no hooks and decides nothing about when to send; that belongs to the caller.
 
-## Indicative commands
+## The one transport
 
-Indicative, finalized in [docs/interface.md](docs/interface.md):
-
-```text
-slack-notice send --stdin-json            # JSON object with title, message, level, link
-slack-notice send --title ... --message ... [--level info|warn|action|error] [--link URL]   # trusted human use
-```
-
-## Dependencies
-
-- curl/HTTP (Slack incoming webhook): binding: TBD (A/B/C), decided in this tool's design session
+0.x talks to a Slack Workflow Builder workflow that starts from a webhook. The URL (`https://hooks.slack.com/triggers/...`) is a secret: anyone holding it can post to the workflow. The workflow decides where the message goes and appears as the workflow's app, not as a person. The classic incoming webhook, `chat.postMessage` with a token and the Slack CLI are not supported ([Transport](docs/interface.md#transport)).
 
 ## Install
 
-```text
+```sh
 uv tool install git+https://github.com/agent-workflow-kit/slack-notice
 ```
 
+## Set up the workflow webhook
+
+1. In Slack, open Workflow Builder and create a workflow that starts from a webhook.
+2. Give the trigger one text variable named `body` (if you choose another name, set `body_variable` in the config).
+3. Add a step that sends a message to the person or channel you want, with the message text set to that variable.
+4. Publish the workflow and copy the webhook URL.
+5. Put the URL in an environment variable, by default `SLACK_WEBHOOK` (the name is the config key `webhook_env`). Treat it as a secret: keep it in an env file with mode 600 and source that file from your shell or cron line. slack-notice never reads files or shell startup scripts to find it.
+6. Run `slack-notice validate --probe` and look in Slack. Slack accepts a request with a wrong variable name and drops it silently, so only you can confirm the message arrived.
+
+## Usage
+
+```sh
+# From JSON on stdin (the form callers use)
+printf '%s' '{"title": "Build done", "message": "All checks passed", "level": "info", "link": "https://example.com/run/1"}' | slack-notice send --stdin-json
+
+# From a file, with machine output
+slack-notice send --file notice.json --json
+
+# From flags, for a human at a terminal
+slack-notice send --title "Backup" --message "Finished" --level warn
+
+# Show the exact text that would be sent, without reading the credential or sending
+slack-notice send --file notice.json --dry-run --json
+
+# Check config and credential shape; --probe also sends one marked test message
+slack-notice validate
+slack-notice validate --probe
+```
+
+Text from other programs travels in a file or stdin, never in argv or the environment. Levels are `info`, `warn`, `action` and `error`; they select a prefix in the message. Output says `sent`, never `delivered`: exit 0 means Slack accepted the request.
+
+## Commands
+
+| Command | Purpose |
+|---|---|
+| `slack-notice send [--stdin-json \| --file <path>\|-] [--title <t>] [--message <m>] [--level <l>] [--link <url>] [--dedupe-key <k>]` | Send one notification. |
+| `slack-notice validate [--probe] [--yes]` | Check config and the credential variable; optionally send a test message. |
+
+Global flags: `--json`, `--config <path>`, `--dry-run`, `--actor <actor>`, `--verbose`, `--quiet`, `--version`.
+
+## Exit codes
+
+0 accepted by Slack (or a dry run); 2 usage or invalid config; 12 failed for a reportable reason (rejected, auth, rate limit, network, unknown outcome); 20 refused before sending with a `reason` (bad payload, empty message, bad link, missing credential); 22 nothing sent because the tool is disabled in config. A caller treats 22 as a successful no-op. See [Exit codes](docs/interface.md#exit-codes).
+
+## Limitations
+
+Plain text only: no formatting, no mentions and no clickable labelled links. There is no delivery confirmation and no deduplication, and Slack silently drops what it throttles. See [Residual risks](docs/interface.md#residual-risks).
+
+## Config and environment
+
+- Config: `~/.config/slack-notice/config.yaml` plus `config.d/*.yaml`; every key is documented in [config.example.yaml](config.example.yaml) and [Config](docs/interface.md#config).
+- Environment: `SLACK_NOTICE_<KEY>` for scalar config keys, and the variable named by `webhook_env` for the URL ([Environment variables](docs/interface.md#environment-variables)).
+- State: `~/.local/state/slack-notice/` holds `log.jsonl` and the send lock ([Files](docs/interface.md#files)).
+
+## Dependencies
+
+No other awkit tool. Python standard library for HTTP; Pydantic for config validation.
+
 ## Documentation
 
+- [docs/interface.md](docs/interface.md): normative interface
+- [docs/design.md](docs/design.md): decisions and internals
 - [awkit architecture](../awkit-docs/architecture.md) ([published](https://github.com/agent-workflow-kit/awkit-docs/blob/main/architecture.md))
 - [awkit design guide](../awkit-docs/design-guide.md) ([published](https://github.com/agent-workflow-kit/awkit-docs/blob/main/design-guide.md))
 
 ## License
 
-MIT — see LICENSE.
+MIT, see LICENSE.
