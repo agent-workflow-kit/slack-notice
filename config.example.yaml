@@ -1,9 +1,11 @@
 # slack-notice example config: every key with its built-in default.
-# Location: ~/.config/slack-notice/config.yaml (XDG_CONFIG_HOME is honoured when it is an absolute path),
-# plus config.d/*.yaml in lexical order; --config <path> reads another file (drop-ins are read next to it).
-# Drop-ins: maps merge. Files are parsed with yaml.safe_load and must be at most 64 KiB.
+# Location: .config/slack-notice/config.yaml under your home directory (from the password database; HOME and
+# XDG_CONFIG_HOME are not read), plus config.d/*.yaml beside it in lexical order; --config <path> reads another
+# file (drop-ins are read from the directory of that file).
+# Drop-ins: maps merge. Files are parsed with a strict YAML loader (so no, off, yes, 1:30 and 0x10 stay strings)
+# and must be at most 64 KiB.
 # Precedence: flags, then config, then defaults. There are no environment overrides.
-# Durations: a number of seconds, or a string such as "500ms", "10s" or "1m" (no unit means seconds);
+# Durations: a number of seconds, or a string such as "10s" or "1m" (no unit means seconds);
 # zero is refused. The tool enforces each key's range at load (exit 2 config_invalid, details.key).
 # Schema: schemas/config.json. Invalid config exits 2 (config_invalid), naming the key.
 
@@ -24,13 +26,13 @@ level_prefix:
   action: "🟡 ACTION"
   error: "🔴 ERROR"
 
-# Body limit in characters (2000 to 12000). A fixed 12000-byte cap also applies.
+# Body limit in characters (2000 to 12000). A 12000-byte cap on the request body also applies.
 # A longer message is cut and ends with "…[truncated]".
 max_chars: 3000
 
 # The one deadline of a send, covering input, waiting for the send lock, the request and retries (3s to 120s).
 timeout: 10s
 
-# false writes no log.jsonl (in the state directory, ~/.local/state/slack-notice by default).
+# false writes no log.jsonl (in the state directory).
 # Dry runs, exit 1, exit 2 and exit 22 are never logged.
 log: true

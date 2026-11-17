@@ -21,7 +21,7 @@
         },
         {
           "type": "string",
-          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m)?$"
+          "pattern": "^(?=.*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m)?(?![\\s\\S])"
         }
       ],
       "description": "Seconds as a positive finite number, or a string matching [0-9]+(\\.[0-9]+)?(ms|s|m)? (no unit means seconds); zero is refused. Booleans are never accepted. Ranges are enforced by the loader and named in the key's description."
@@ -29,17 +29,17 @@
     "ts": {
       "type": "string",
       "format": "date-time",
-      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})$",
-      "description": "RFC 3339."
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z(?![\\s\\S])",
+      "description": "UTC with millisecond precision: YYYY-MM-DDTHH:MM:SS.mmmZ."
     },
     "sha256_16": {
       "type": "string",
-      "pattern": "^[0-9a-f]{16}$",
+      "pattern": "^[0-9a-f]{16}(?![\\s\\S])",
       "description": "First 16 hex characters of a SHA-256."
     },
     "actor": {
       "type": "string",
-      "pattern": "^(human|auto):[A-Za-z0-9._@/-]{1,64}$",
+      "pattern": "^(human|auto):[A-Za-z0-9._@/-]{1,64}(?![\\s\\S])",
       "description": "human:<user> or auto:<name>. Advisory against same-user processes."
     },
     "dedupe_key": {
@@ -93,16 +93,17 @@
       "properties": {
         "key": {
           "type": "string",
-          "description": "config_invalid: the offending config key."
+          "maxLength": 4096,
+          "description": "config_invalid: a config key name matching [A-Za-z0-9_]{1,64} (else ?), --config for a missing --config file, or the file path for a file that cannot be read or parsed."
         },
         "pointer": {
           "type": "string",
-          "pattern": "^(?:/[^/]*)*$",
-          "description": "invalid_payload: RFC 6901 JSON pointer into the input."
+          "pattern": "^(?:|/(?:[A-Za-z0-9_-]{1,64}|\\?))(?![\\s\\S])",
+          "description": "invalid_payload: empty for the whole input, else /<field> (/? when the field name does not match [A-Za-z0-9_-]{1,64}). Never an input value."
         },
         "env": {
           "type": "string",
-          "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}(?![\\s\\S])",
           "description": "credential_invalid: the name (never the value) of the variable."
         },
         "host_error": {
@@ -111,14 +112,14 @@
             "null"
           ],
           "x-untrusted": true,
-          "pattern": "^[a-z_]{1,64}$",
+          "pattern": "^[a-z_]{1,64}(?![\\s\\S])",
           "description": "host_rejected: the string value of the response's key error when it matches [a-z_]{1,64}, else null. Untrusted: from the server."
         },
         "http_status": {
           "type": "integer",
           "minimum": 100,
           "maximum": 599,
-          "description": "host_rejected: 400; auth_required: 401, 403, 404 or 410."
+          "description": "Every code that came from a response (auth_required, host_rejected, rate_limited, upstream_error, wrong_host_response): the status. host_rejected: 400; auth_required: 401, 403, 404 or 410."
         },
         "tls": {
           "type": "boolean",
@@ -129,7 +130,8 @@
           "description": "network_error: true when the deadline passed before the first request byte."
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "Fixed strings and names only, never an input value or a credential; null when nothing applies."
     },
     "error": {
       "type": "object",
@@ -140,7 +142,7 @@
         "message": {
           "type": "string",
           "minLength": 1,
-          "description": "Never contains the webhook URL or any part of it."
+          "description": "A fixed string of the tool: never a response body, header, exception text, input value, the webhook URL or any part of it."
         },
         "reason": {
           "type": [
@@ -165,7 +167,7 @@
             "null"
           ],
           "minimum": 0,
-          "description": "Set only for rate_limited (the last wait, or the wait that did not fit the deadline), else null."
+          "description": "Set only for rate_limited (the wait that was last performed, or the wait that did not fit the deadline; the tool's own backoff, not a server hint), else null."
         },
         "unknown_outcome": {
           "type": [
@@ -279,19 +281,13 @@
           "then": {
             "properties": {
               "retryable": {
-                "enum": [
-                  false,
-                  null
-                ]
+                "const": false
               },
               "retry_after_s": {
                 "type": "null"
               },
               "unknown_outcome": {
-                "type": [
-                  "boolean",
-                  "null"
-                ]
+                "type": "boolean"
               }
             }
           }

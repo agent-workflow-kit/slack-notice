@@ -26,6 +26,7 @@ slack-notice is an awkit L1 primitive: send one plain-text notification to Slack
 - Semver. A breaking interface change is, before 1.0, a `feat` commit whose title names the break (never `!` before 1.0), and from 1.0 on a `!` commit; the title becomes the changelog line (details go in the PR body). Either way, update `awkit-docs/interface-registry.md`. Never hand-edit CHANGELOG.md or the version.
 - Run `make verify` before every commit.
 - All subprocess and HTTP calls go through `src/slack_notice/gateway.py`.
+- Config and state locations come from the password-database home; no environment variable selects them.
 - The webhook URL is read only from the variable named by `webhook_env` and never appears in argv, URLs, logs, output or errors.
 - Never run destructive git commands (reset, checkout --, clean, restore, stash drop,
   force-push). Never kill processes by pattern; only signal an exact PID this tool started.

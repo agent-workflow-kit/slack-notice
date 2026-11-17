@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/cli/validate.json",
   "title": "validate --json output",
-  "description": "Printed by validate when the config loads (an unloadable config prints the error envelope and exits 2). validate never prompts. Checks run in order (config, credential, test_message) and a failed check ends the run, so ok is true only when every printed check is ok. ok false is printed with the exit code of the failing check. With --test-message on a disabled tool nothing is sent and the document is {outcome: disabled} (exit 22). Delivery of a test message is not observable: a human must look in Slack.",
+  "description": "Printed by validate when the config loads (an unloadable config prints the error envelope and exits 2). validate never prompts. Checks run in order (config, credential, test_message) and a failed check ends the run, so ok is true only when every printed check is ok. ok false is printed with the exit code of the failing check. Plain validate of a disabled tool runs its checks and reports enabled false. With --test-message on a disabled tool nothing is sent, no check runs and the document is {outcome: disabled} (exit 22), as in send.json. Delivery of a test message is not observable: a human must look in Slack.",
   "oneOf": [
     {
       "type": "object",

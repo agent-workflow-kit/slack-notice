@@ -36,13 +36,14 @@ uv tool install git+https://github.com/agent-workflow-kit/slack-notice
 2. Give the trigger one text variable named `body` (if you choose another name, set `body_variable` in the config).
 3. Add a step that sends a message to the person or channel you want, with the message text set to that variable.
 4. Publish the workflow and copy the webhook URL.
-5. Put the URL in an environment variable, by default `SLACK_WEBHOOK` (the name is the config key `webhook_env`). Treat it as a secret: create the env file with `umask 077`, never truncate an existing one, and source it from your shell or cron line. slack-notice never reads files or shell startup scripts to find it.
+5. Put the URL in an environment variable, by default `SLACK_WEBHOOK` (the name is the config key `webhook_env`). Treat it as a secret: create the env file in a subshell with `umask 077`, never truncate an existing one, and load it with `set -a` (or keep the `export`) so the variable reaches the tool. slack-notice never reads files or shell startup scripts to find it.
 6. Run `slack-notice validate` to check the config and the credential. Then run `slack-notice validate --test-message` once by hand and look in Slack. Slack accepts a request with a wrong variable name and drops it silently, so only you can confirm the message arrived. Automation never calls `--test-message`.
 
 ```sh
-mkdir -p ~/.config/slack-notice
-( umask 077; printf 'SLACK_WEBHOOK=%s\n' 'https://hooks.slack.com/triggers/...' >> ~/.config/slack-notice/env )
+( umask 077; mkdir -p ~/.config/slack-notice; chmod 700 ~/.config/slack-notice; printf 'export SLACK_WEBHOOK=%s\n' 'https://hooks.slack.com/triggers/...' >> ~/.config/slack-notice/env )
 ```
+
+A second run of the append command adds a second line and the last one wins; edit the file instead.
 
 A cron line sources the env file and uses the absolute path of the binary (cron has no `uv tool` PATH):
 
@@ -72,16 +73,24 @@ slack-notice validate
 slack-notice validate --test-message
 ```
 
-Text from other programs travels in a file or stdin, never in argv or the environment. Levels are `info`, `warn`, `action` and `error`; they select a prefix in the message. Output says `sent`, never `delivered`: exit 0 means Slack accepted the request.
+Text from other programs travels in a file or stdin, never in argv or the environment. A caller that has a deduplication key passes a hex digest of it in the `=` form (`--dedupe-key=<hex>`).
+
+A shell caller maps the disabled exit to success:
+
+```sh
+printf '%s' "$payload" | slack-notice send --stdin-json --json --actor auto:myjob; rc=$?; [ "$rc" = 22 ] && rc=0
+```
+
+ Levels are `info`, `warn`, `action` and `error`; they select a prefix in the message. Output says `sent`, never `delivered`: exit 0 means Slack accepted the request.
 
 ## Commands
 
 | Command | Purpose |
 |---|---|
 | `slack-notice send [--stdin-json \| --file <path>\|-] [--title <t>] [--message <m>] [--level <l>] [--link <url>] [--dedupe-key <k>]` | Send one notification. |
-| `slack-notice validate [--test-message]` | Check config and the credential variable; with `--test-message`, send one test notification. |
+| `slack-notice validate [--test-message]` | Check config and the credential variable (a disabled tool still reports them); with `--test-message`, send one test notification (a disabled tool prints `{"outcome":"disabled"}` and exits 22 without a call). |
 
-Global flags: `--json`, `--config <path>`, `--dry-run`, `--actor <actor>`, `--verbose`, `--quiet`, `--version`. `--decision-id` is accepted and ignored.
+Global flags: `--json`, `--config <path>`, `--dry-run`, `--actor <actor>`, `--verbose`, `--quiet`, `--version`. Flags are exact (no abbreviations; `--flag=value` works for any value). `--decision-id` is a `send` flag, accepted and ignored.
 
 ## Exit codes
 
@@ -89,13 +98,13 @@ Global flags: `--json`, `--config <path>`, `--dry-run`, `--actor <actor>`, `--ve
 
 ## Limitations
 
-Plain text only: no formatting, no mentions and no clickable labelled links. There is no delivery confirmation and no deduplication. A burst of 12 requests in about 3 seconds got 429 in testing (no sustained rate was measured; 1 s spacing is a conservative guess); a throttled request is answered 429, while Slack silently drops an oversized body or a misnamed variable with a success status. Proxies and custom CA environment variables are not supported in 0.x. See [Residual risks](docs/interface.md#residual-risks).
+Plain text only: no formatting, no mentions and no clickable labelled links. There is no delivery confirmation and no deduplication. A burst of 12 requests in about 3 seconds got 429 in testing (no sustained rate was measured; 1 s spacing is a conservative guess); a throttled request is answered 429, while Slack silently drops an oversized body or a misnamed variable with a success status. A `Retry-After` header is ignored; waits are 2 s and 4 s. Proxies and custom CA environment variables are not supported in 0.x. See [Residual risks](docs/interface.md#residual-risks).
 
 ## Config and environment
 
-- Config: `~/.config/slack-notice/config.yaml` plus `config.d/*.yaml`; every key is documented in [config.example.yaml](config.example.yaml) and [Config](docs/interface.md#config).
-- Environment: only the variable named by `webhook_env` (the URL) and `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `HOME` are read; there are no `SLACK_NOTICE_*` overrides ([Environment variables](docs/interface.md#environment-variables)).
-- State: `~/.local/state/slack-notice/` holds `log.jsonl` and the lock files ([Files](docs/interface.md#files)). A state problem only warns and never fails a send.
+- Config: `.config/slack-notice/config.yaml` under your home directory (from the password database) plus `config.d/*.yaml` beside it; `--config <path>` selects another file (cron lines can use it); every key is documented in [config.example.yaml](config.example.yaml) and [Config](docs/interface.md#config).
+- Environment: only the variable named by `webhook_env` (the URL) is read; `HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are not, and there are no `SLACK_NOTICE_*` overrides ([Environment variables](docs/interface.md#environment-variables)).
+- State: the state directory (`.local/state/slack-notice` under the home directory) holds `log.jsonl` and the lock files ([Files](docs/interface.md#files)). A state problem only warns and never fails a send.
 
 ## Dependencies
 
