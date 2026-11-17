@@ -94,7 +94,14 @@
         "key": {
           "type": "string",
           "maxLength": 4096,
-          "description": "config_invalid: a config key name matching [A-Za-z0-9_]{1,64} (else ?), --config for a missing --config file, or the file path for a file that cannot be read or parsed."
+          "description": "config_invalid: a config key name matching [A-Za-z0-9_]{1,64} (else ?), --config for a missing --config file, home for a home directory that cannot be used (lookup failure, empty, relative or not an existing directory), or the file path for a file that cannot be read or parsed."
+        },
+        "phase": {
+          "enum": [
+            "input",
+            "lock"
+          ],
+          "description": "unavailable: where the deadline passed with nothing sent: input (the input did not arrive) or lock (the send lock wait)."
         },
         "pointer": {
           "type": "string",
@@ -538,6 +545,62 @@
                   "key": {
                     "type": "string"
                   }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "phase"
+                ],
+                "properties": {
+                  "phase": {
+                    "enum": [
+                      "input",
+                      "lock"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "else": {
+            "properties": {
+              "details": {
+                "not": {
+                  "required": [
+                    "phase"
+                  ]
                 }
               }
             }

@@ -94,7 +94,7 @@ Global flags: `--json`, `--config <path>`, `--dry-run`, `--actor <actor>`, `--ve
 
 ## Exit codes
 
-0 accepted by Slack (or a dry run); 2 usage or invalid config; 12 failed for a reportable reason (`host_rejected`, `auth_required`, `credential_invalid`, `rate_limited`, `upstream_error`, `network_error`, `outcome_unknown`, `wrong_host_response`, `unavailable`; read `retryable` and `unknown_outcome`); 20 the payload was refused before sending (`code: refused`) with a `reason` (`invalid_payload`, `empty_message`, `link_invalid`, `link_scheme`); 22 nothing sent because the tool is disabled in config. A caller treats 22 as a successful no-op. See [Exit codes](docs/interface.md#exit-codes).
+0 accepted by Slack (or a dry run); 2 usage or invalid config; 12 failed for a reportable reason (`host_rejected`, `auth_required`, `credential_invalid`, `rate_limited`, `upstream_error`, `network_error`, `outcome_unknown`, `wrong_host_response`, `unavailable`; read `retryable` and `unknown_outcome`); 20 the payload was refused before sending (`code: refused`) with a `reason` (`invalid_payload`, `empty_message`, `link_invalid`, `link_scheme`); 22 nothing sent because the tool is disabled in config. A caller treats 22 as a successful no-op. A SIGTERM, SIGINT or SIGHUP before the send starts ends the tool with 128+N, no output and no log record. `unavailable` also covers input that did not arrive within the deadline (nothing was sent; retry later). Callers kill the tool no earlier than `timeout` plus 10 s. See [Exit codes](docs/interface.md#exit-codes).
 
 ## Limitations
 
@@ -102,8 +102,8 @@ Plain text only: no formatting, no mentions and no clickable labelled links. The
 
 ## Config and environment
 
-- Config: `.config/slack-notice/config.yaml` under your home directory (from the password database) plus `config.d/*.yaml` beside it; `--config <path>` selects another file (cron lines can use it); every key is documented in [config.example.yaml](config.example.yaml) and [Config](docs/interface.md#config).
-- Environment: only the variable named by `webhook_env` (the URL) is read; `HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are not, and there are no `SLACK_NOTICE_*` overrides ([Environment variables](docs/interface.md#environment-variables)).
+- Config: `.config/slack-notice/config.yaml` under your home directory (from the password database; a home directory that cannot be used is exit 2) plus `config.d/*.yaml` beside it; `--config <path>` selects another file (cron lines can use it); every key is documented in [config.example.yaml](config.example.yaml) and [Config](docs/interface.md#config).
+- Environment: only the variable named by `webhook_env` (the URL) is read; `HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are not read, and there are no `SLACK_NOTICE_*` overrides ([Environment variables](docs/interface.md#environment-variables)).
 - State: the state directory (`.local/state/slack-notice` under the home directory) holds `log.jsonl` and the lock files ([Files](docs/interface.md#files)). A state problem only warns and never fails a send.
 
 ## Dependencies
