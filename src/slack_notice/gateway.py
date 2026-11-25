@@ -1,9 +1,13 @@
 """Gateway: the single boundary between slack-notice and the outside world.
 
-Every other module reaches the network, the clock, name resolution, the password database,
-input sources, CA files and state files through the ``Gateway`` protocol defined here, so tests
-can pass a fake (issue #5). A test (``tests/test_gateway.py``) fails if any other module imports
-``urllib``, ``http.client``, ``time`` or ``fcntl``.
+Every other module reaches the network, the clock (``monotonic``, ``wall_time``, ``sleep``),
+name resolution, the password database (``home_dir``, ``uid``, ``login_name``), input sources
+(``read_source``), CA files, config-style files (``read_regular_file``) and state files
+(``open_state_dir``, ``open_state_file``, ``try_lock``, ``unlock``) through the ``Gateway``
+protocol defined here, so tests can pass a fake (issue #5). A test (``tests/test_gateway.py``)
+fails if any other module imports ``urllib``, ``http``, ``time``, ``fcntl`` or ``subprocess``
+or reaches them dynamically. Failures that callers must tell apart are ``NoUsableCA``,
+``HomeLookupError``, ``NotRegularFile`` and ``StateUnusable`` (each with a fixed message).
 
 Hard rules, enforced by tests:
 
@@ -11,8 +15,11 @@ Hard rules, enforced by tests:
   ``HOME`` and ``XDG_*`` are never consulted; the home directory comes from the password
   database and trust comes from the compiled OpenSSL defaults (or fixed fallback files).
 - ``urllib`` is not used: it reads proxy and CA variables and follows redirects.
-- Failures carry fixed messages. No exception text from ``http.client``, ``ssl`` or ``socket``
-  is re-raised under a new message, and no URL, header or body is ever formatted into one.
+- Failures raised here carry fixed messages and never chain a cause that holds a path. Text of
+  ``http.client`` exceptions that can quote the request target (``InvalidURL``) is replaced by a
+  fixed message; other ``http.client``, ``ssl`` and ``socket`` exceptions pass through with
+  their own class, and no URL, header or body is formatted into a message here.
+- ``Retry-After``, ``Location`` and every other response header are unreachable.
 """
 
 from __future__ import annotations
@@ -26,9 +33,8 @@ import select
 import socket
 import ssl
 import stat
-import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 # Interface, "Input": at most 100 ms per slice so the main thread notices a deadline or signal;
@@ -42,20 +48,6 @@ CA_FALLBACK_FILES = (
     "/etc/pki/tls/certs/ca-bundle.crt",
     "/etc/ssl/cert.pem",
 )
-
-
-def run(
-    argv: list[str], *, stdin: str | None = None, timeout: float | None = None
-) -> subprocess.CompletedProcess[str]:
-    """Run ``argv`` without a shell and capture its text output."""
-    return subprocess.run(
-        argv,
-        input=stdin,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
 
 
 # --- errors ---------------------------------------------------------------------------------
@@ -102,7 +94,7 @@ class SourceRead:
     available; ``data`` is cut to ``max_bytes``.
     """
 
-    data: bytes
+    data: bytes = field(repr=False)
     timed_out: bool = False
     too_large: bool = False
 
@@ -117,18 +109,15 @@ class CaCandidates:
 
 
 class Response(Protocol):
-    """A complete-or-failing HTTP response. Only what the tool needs is exposed: the status, a
-    raw ``Retry-After`` value and the body. ``Location`` and every other header are
-    unreachable by design (a redirect is never followed or read)."""
+    """A complete-or-failing HTTP response. Only the status and the body are exposed: no header
+    is reachable by design (a redirect is never followed, ``Retry-After`` is never read)."""
 
     @property
     def status(self) -> int: ...
 
-    @property
-    def retry_after(self) -> str | None: ...
-
     def read(self, amount: int) -> bytes:
-        """Read at most ``amount`` bytes; ``b""`` at the end of the body."""
+        """Read at most ``amount`` bytes; ``b""`` at the end of the body. A body shorter than
+        its ``Content-Length`` raises ``http.client.IncompleteRead``."""
         ...
 
 
@@ -215,6 +204,11 @@ def is_tls_error(exc: BaseException) -> bool:
     return isinstance(exc, ssl.SSLError | NoUsableCA)
 
 
+def is_cert_verification_error(exc: BaseException) -> bool:
+    """A certificate failed verification (a subset of ``is_tls_error``)."""
+    return isinstance(exc, ssl.SSLCertVerificationError)
+
+
 def is_malformed_response(exc: BaseException) -> bool:
     """An answer arrived but is not HTTP (wrong_host_response), as opposed to a lost one.
 
@@ -281,12 +275,12 @@ class _HttpsResponse:
     def status(self) -> int:
         return self._response.status
 
-    @property
-    def retry_after(self) -> str | None:
-        return self._response.getheader("Retry-After")
-
     def read(self, amount: int) -> bytes:
-        return self._response.read(amount)
+        data = self._response.read(amount)
+        # http.client returns b"" for a body cut short; ``length`` is the declared bytes left.
+        if not data and amount > 0 and self._response.length:
+            raise http.client.IncompleteRead(b"", self._response.length)
+        return data
 
 
 class _HttpsConnection:
@@ -314,7 +308,11 @@ class _HttpsConnection:
             "Connection": "close",
             "User-Agent": self._user_agent,
         }
-        self._conn.request("POST", path, body=body, headers=headers)
+        try:
+            self._conn.request("POST", path, body=body, headers=headers)
+        except http.client.InvalidURL:
+            # The original message quotes the request target, which holds the webhook secret.
+            raise http.client.InvalidURL("invalid request") from None
 
     def getresponse(self) -> Response:
         return _HttpsResponse(self._conn.getresponse())
@@ -333,7 +331,7 @@ class _HttpsConnection:
 
 def _open_regular_for_reading(path: str | os.PathLike[str]) -> int:
     """Open without blocking (a FIFO must not hang the tool) and require a regular file."""
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise NotRegularFile
@@ -366,8 +364,8 @@ class SystemGateway:
     def home_dir(self) -> str:
         try:
             return pwd.getpwuid(self.uid()).pw_dir
-        except (KeyError, OSError) as error:
-            raise HomeLookupError from error
+        except (KeyError, OSError):
+            raise HomeLookupError from None
 
     def uid(self) -> int:
         return os.getuid()
@@ -386,35 +384,51 @@ class SystemGateway:
         ``remaining`` is the seconds left of the deadline when the call starts. A source that is
         not at end of input when it runs out is ``timed_out`` (even if some bytes arrived: they
         are returned but were not judged). A path must be a regular file, else ``NotRegularFile``
-        (and ``OSError`` for open failures); a descriptor is read as given and not closed.
-        """
-        owned = not isinstance(fd_or_path, int)
-        fd = fd_or_path if isinstance(fd_or_path, int) else _open_regular_for_reading(fd_or_path)
-        try:
-            return self._read_fd(fd, max_bytes, remaining)
-        finally:
-            if owned:
-                os.close(fd)
+        (and ``OSError`` for open failures); a descriptor is read as given and not closed, and a
+        descriptor that is closed, write-only or a directory is an empty or ended input (the
+        bytes read so far), never an error.
 
-    def _read_fd(self, fd: int, max_bytes: int, remaining: float) -> SourceRead:
+        Python signal handlers run between slices, in the main thread. A handler that only sets
+        a flag does not stop this call: the handler must raise or exit.
+        """
+        # todo(#27): signal handler before step 5 must exit/raise; read_source has no stop callback
+        if isinstance(fd_or_path, int):
+            return self._read_fd(fd_or_path, max_bytes, remaining, lenient=True)
+        fd = _open_regular_for_reading(fd_or_path)
+        try:
+            return self._read_fd(fd, max_bytes, remaining, lenient=False)
+        finally:
+            os.close(fd)
+
+    def _read_fd(self, fd: int, max_bytes: int, remaining: float, *, lenient: bool) -> SourceRead:
         deadline = self.monotonic() + remaining
-        poller = select.poll()
-        poller.register(fd, select.POLLIN)
         chunks: list[bytes] = []
         total = 0
+        try:
+            if lenient and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_WRONLY:
+                return SourceRead(b"")  # poll never reports a write-only descriptor readable
+            poller = select.poll()
+            poller.register(fd, select.POLLIN)
+        except (OSError, ValueError, OverflowError):
+            if not lenient:
+                raise
+            return SourceRead(b"")
         while True:
             left = deadline - self.monotonic()
-            if left <= 0:
+            # ``not left > 0`` also ends a NaN deadline at once.
+            if not left > 0:
                 return SourceRead(b"".join(chunks), timed_out=True)
             # A regular file is always ready, so it is read in chunks with the same checks.
-            if not poller.poll(min(SLICE_SECONDS, left) * 1000):
-                continue
             try:
+                if not poller.poll(min(SLICE_SECONDS, left) * 1000):
+                    continue
                 chunk = os.read(fd, min(CHUNK_BYTES, max_bytes + 1 - total))
-            except BlockingIOError:
+            except (BlockingIOError, InterruptedError):
                 continue
-            except InterruptedError:
-                continue
+            except OSError:
+                if not lenient:
+                    raise
+                return SourceRead(b"".join(chunks))
             if not chunk:
                 return SourceRead(b"".join(chunks))
             chunks.append(chunk)
@@ -444,6 +458,8 @@ class SystemGateway:
         Opened with ``O_DIRECTORY | O_NOFOLLOW`` and checked on the descriptor: owned by the
         user, no group or other permission bits. Anything else is ``StateUnusable``.
         """
+        if not home or not os.path.isabs(home):
+            raise StateUnusable("open")
         parent = os.path.join(home, ".local", "state")
         leaf = os.path.join(parent, "slack-notice")
         try:
@@ -453,8 +469,8 @@ class SystemGateway:
             except FileExistsError:
                 pass
             fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        except OSError as error:
-            raise StateUnusable("open") from error
+        except (OSError, ValueError):
+            raise StateUnusable("open") from None
         info = os.fstat(fd)
         if info.st_uid != self.uid():
             os.close(fd)
@@ -472,13 +488,13 @@ class SystemGateway:
         """
         if not name or "/" in name or name in (".", "..") or "\0" in name:
             raise ValueError("state file name must be one plain path component")
-        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
         if append:
             flags |= os.O_APPEND
         try:
             fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
-        except OSError as error:
-            raise StateUnusable("open") from error
+        except OSError:
+            raise StateUnusable("open") from None
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             os.close(fd)
             raise StateUnusable("not_regular")

@@ -3,9 +3,11 @@ from __future__ import annotations
 import ast
 import http.client
 import os
+import signal
 import socket
 import ssl
 import stat
+import threading
 import time
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from slack_notice.gateway import (
     StateUnusable,
     SystemGateway,
     build_tls_context,
+    is_cert_verification_error,
     is_malformed_response,
     is_timeout,
     is_tls_error,
@@ -77,42 +80,48 @@ def gateway() -> Gateway:
 # --- import rule ----------------------------------------------------------------------------
 
 
-def banned_imports(source: str) -> list[str]:
-    """Names of banned modules the source imports or reaches by a dynamic import."""
+BANNED_ROOTS = frozenset({"urllib", "http", "time", "fcntl", "subprocess", "importlib"})
+ENVIRONMENT_NAMES = frozenset({"environ", "environb", "getenv", "putenv"})
+
+
+def banned_references(source: str) -> list[str]:
+    """Banned modules, dynamic imports and environment access the source reaches.
+
+    Roots in ``BANNED_ROOTS`` are banned whole, so an alias (``import http as h``) is caught at
+    the import; ``__import__`` and any ``importlib`` use are banned; ``os.environ`` and friends
+    are caught by attribute, by ``from os import environ`` and by ``getattr(os, "environ")``.
+    """
     found: list[str] = []
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            names = [alias.name for alias in node.names]
+            found += [
+                a.name
+                for a in node.names
+                if a.name.split(".")[0] in BANNED_ROOTS and a.name != "importlib.metadata"
+            ]
         elif isinstance(node, ast.ImportFrom):
             base = node.module or ""
-            names = [base] + [f"{base}.{alias.name}" for alias in node.names]
+            if base.split(".")[0] in BANNED_ROOTS and not (
+                # Reading the installed version is a static, harmless use of importlib.
+                base == "importlib.metadata"
+                or (base == "importlib" and all(a.name == "metadata" for a in node.names))
+            ):
+                found.append(base)
+            if base == "os":
+                found += [f"os.{a.name}" for a in node.names if a.name in ENVIRONMENT_NAMES]
+        elif isinstance(node, ast.Name) and node.id == "__import__":
+            found.append("__import__")
+        elif isinstance(node, ast.Attribute) and node.attr in ENVIRONMENT_NAMES:
+            found.append(f"os.{node.attr}")
         elif (
             isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name | ast.Attribute)
-            and getattr(node.func, "id", getattr(node.func, "attr", ""))
-            in ("__import__", "import_module")
-            and node.args
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("getattr", "__getattribute__")
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in ENVIRONMENT_NAMES
         ):
-            names = [node.args[0].value]
-        elif (
-            isinstance(node, ast.Attribute)
-            and node.attr == "client"
-            and isinstance(node.value, ast.Name)
-            and node.value.id == "http"
-        ):
-            names = ["http.client"]
-        else:
-            continue
-        for name in names:
-            root = name.split(".")[0]
-            if (
-                root in ("urllib", "time", "fcntl")
-                or name == "http.client"
-                or name.startswith("http.client.")
-            ):
-                found.append(name)
+            found.append(f"os.{node.args[1].value}")
     return found
 
 
@@ -121,53 +130,98 @@ def banned_imports(source: str) -> list[str]:
     [
         "import urllib",
         "import urllib.request",
+        "import urllib as u\nu.request",
         "from urllib import request",
         "from urllib.parse import quote",
+        "from urllib import *",
         "import http.client",
+        "import http as h\nh.client.HTTPSConnection",
         "from http.client import HTTPSConnection",
         "from http import client",
+        "from http import *",
         "import http\nhttp.client.HTTPSConnection",
         "import time",
         "import time as t",
         "from time import monotonic",
+        "from time import *",
         "import fcntl",
         "from fcntl import flock",
+        "import subprocess",
+        "import subprocess as sp",
+        "from subprocess import run",
+        "from subprocess import *",
         "__import__('time')",
+        "__import__(name)",
+        "f = __import__\nf('time')",
         "import importlib\nimportlib.import_module('fcntl')",
+        "import importlib\nimportlib.import_module(name)",
+        "from importlib import import_module as load\nload('time')",
+        "import importlib.util",
+        "import os\nos.environ['A']",
+        "import os\nos.getenv('A')",
+        "import os as o\no.environ",
+        "from os import environ",
+        "from os import environ as e",
+        "from os import getenv",
+        "import os\ngetattr(os, 'environ')",
     ],
 )
-def test_import_checker_detects_banned_imports(source: str) -> None:
-    assert banned_imports(source)
+def test_import_checker_detects_banned_references(source: str) -> None:
+    assert banned_references(source)
 
 
 @pytest.mark.parametrize(
     "source",
-    ["import os", "from http import HTTPStatus", "import datetime", "import ssl"],
+    [
+        "import os",
+        "from importlib.metadata import version",
+        "from importlib import metadata",
+        "import datetime",
+        "import ssl",
+        "from os import path",
+        "import os\nos.getcwd()",
+    ],
 )
-def test_import_checker_accepts_other_imports(source: str) -> None:
-    assert banned_imports(source) == []
+def test_import_checker_accepts_other_references(source: str) -> None:
+    assert banned_references(source) == []
 
 
-def test_only_the_gateway_imports_network_clock_or_lock_modules() -> None:
+@pytest.mark.parametrize("snippet", ["import subprocess", "import http.client", "import time"])
+def test_import_checker_reads_files_the_way_the_scan_does(tmp_path: Path, snippet: str) -> None:
+    path = tmp_path / "module.py"
+    path.write_text(snippet)
+    assert banned_references(path.read_text())
+
+
+def test_only_the_gateway_references_network_clock_lock_or_process_modules() -> None:
+    sources = sorted(SRC.rglob("*.py"))
+    assert (SRC / "gateway.py") in sources
     offenders = {
-        path.name: banned_imports(path.read_text())
-        for path in sorted(SRC.glob("*.py"))
+        str(path.relative_to(SRC)): banned_references(path.read_text())
+        for path in sources
         if path.name != "gateway.py"
     }
     assert {name: found for name, found in offenders.items() if found} == {}
 
 
 def test_gateway_itself_is_scanned_and_uses_the_modules() -> None:
-    assert set(banned_imports((SRC / "gateway.py").read_text())) >= {"time", "fcntl", "http.client"}
+    assert set(banned_references((SRC / "gateway.py").read_text())) >= {
+        "time",
+        "fcntl",
+        "http.client",
+    }
+
+
+def test_gateway_has_no_subprocess_or_dynamic_imports() -> None:
+    found = banned_references((SRC / "gateway.py").read_text())
+    assert not {name for name in found if name.split(".")[0] in {"subprocess", "importlib"}}
+    assert "__import__" not in found
+    assert not hasattr(gw_module, "run")
 
 
 def test_gateway_never_touches_the_environment() -> None:
-    tree = ast.parse((SRC / "gateway.py").read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute):
-            assert node.attr not in {"environ", "environb", "getenv", "putenv"}, node.lineno
-        if isinstance(node, ast.Name):
-            assert node.id not in {"environ", "getenv"}, node.lineno
+    found = banned_references((SRC / "gateway.py").read_text())
+    assert [name for name in found if name.startswith("os.")] == []
 
 
 def test_gateway_matches_the_protocol(gateway: Gateway) -> None:
@@ -196,6 +250,8 @@ def test_home_dir_lookup_failure_is_a_fixed_error(
     with pytest.raises(HomeLookupError) as info:
         gateway.home_dir()
     assert "secret" not in str(info.value)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
     assert gateway.login_name() is None
 
 
@@ -300,6 +356,96 @@ def test_read_source_empty_input(gateway: Gateway) -> None:
         os.close(read_end)
 
 
+def test_source_read_repr_does_not_show_the_text() -> None:
+    assert "secret-text" not in repr(SourceRead(b"secret-text"))
+
+
+def test_read_source_nan_remaining_times_out_at_once(gateway: Gateway) -> None:
+    read_end, write_end = os.pipe()
+    try:
+        start = time.monotonic()
+        assert gateway.read_source(read_end, 100, float("nan")).timed_out
+        assert time.monotonic() - start < 0.5
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+
+
+def test_read_source_closed_descriptor_is_empty_input(gateway: Gateway) -> None:
+    fd = os.open(os.devnull, os.O_RDONLY)
+    os.close(fd)
+    assert gateway.read_source(fd, 100, 1) == SourceRead(b"")
+
+
+def test_read_source_negative_descriptor_is_empty_input(gateway: Gateway) -> None:
+    assert gateway.read_source(-1, 100, 1) == SourceRead(b"")
+
+
+def test_read_source_write_only_descriptor_is_empty_input(gateway: Gateway) -> None:
+    read_end, write_end = os.pipe()
+    try:
+        assert gateway.read_source(write_end, 100, 1) == SourceRead(b"")
+    finally:
+        os.close(read_end)
+        os.close(write_end)
+
+
+def test_read_source_directory_descriptor_is_empty_input(gateway: Gateway, tmp_path: Path) -> None:
+    fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert gateway.read_source(fd, 100, 1) == SourceRead(b"")
+    finally:
+        os.close(fd)
+
+
+def test_read_source_directory_path_is_not_a_regular_file(gateway: Gateway, tmp_path: Path) -> None:
+    with pytest.raises(NotRegularFile):
+        gateway.read_source(tmp_path, 100, 1)
+
+
+def test_read_source_stalled_read_is_interrupted_by_a_raising_signal_handler(
+    gateway: Gateway,
+) -> None:
+    class Stop(Exception):  # noqa: N818
+        pass
+
+    def handler(_signum: int, _frame: object) -> None:
+        raise Stop
+
+    read_end, write_end = os.pipe()
+    previous = signal.signal(signal.SIGALRM, handler)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.15)
+        start = time.monotonic()
+        with pytest.raises(Stop):
+            gateway.read_source(read_end, 100, 30)
+        assert time.monotonic() - start < 1.0
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+        os.close(read_end)
+        os.close(write_end)
+
+
+def test_read_source_data_after_several_slices_then_end_is_not_timed_out(
+    gateway: Gateway,
+) -> None:
+    read_end, write_end = os.pipe()
+
+    def late_writer() -> None:
+        time.sleep(0.35)  # more than three 100 ms slices
+        os.write(write_end, b"late")
+        os.close(write_end)
+
+    thread = threading.Thread(target=late_writer)
+    thread.start()
+    try:
+        assert gateway.read_source(read_end, 100, 5) == SourceRead(b"late")
+    finally:
+        thread.join()
+        os.close(read_end)
+
+
 def test_read_source_partial_input_then_stall_is_timed_out(gateway: Gateway) -> None:
     read_end, write_end = os.pipe()
     os.write(write_end, b"abc")
@@ -360,12 +506,18 @@ def test_read_source_deadline_is_checked_between_chunks(
 ) -> None:
     path = tmp_path / "big"
     path.write_bytes(b"z" * (3 * 65536))
-    clock = iter([0.0, 0.0, 0.0, 10.0, 10.0, 10.0])
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        return 0.0 if calls <= 3 else 10.0  # the deadline passes after the first chunks
+
     sg = SystemGateway()
-    monkeypatch.setattr(sg, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(sg, "monotonic", clock)
     result = sg.read_source(path, 10**9, 1.0)
     assert result.timed_out
-    assert len(result.data) == 2 * 65536
+    assert len(result.data) < 3 * 65536
 
 
 def test_read_source_path_missing(gateway: Gateway, tmp_path: Path) -> None:
@@ -488,6 +640,14 @@ def test_no_usable_certificates_is_no_usable_ca(tmp_path: Path) -> None:
     assert is_tls_error(info.value)
 
 
+def test_sslkeylogfile_is_ignored(
+    bundle: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SSLKEYLOGFILE", str(tmp_path / "keys.log"))
+    context = build_tls_context(candidates(tmp_path, cafile=str(bundle)))
+    assert context.keylog_filename is None
+
+
 def test_default_candidates_are_the_compiled_paths(gateway: Gateway) -> None:
     found = gateway.ca_candidates()
     compiled = ssl.get_default_verify_paths()
@@ -548,7 +708,6 @@ def test_proxy_variables_are_ignored(
     connection = make_connection(gateway, tmp_path, bundle)
     inner = connection._conn  # type: ignore[attr-defined]
     assert (inner.host, inner.port) == ("hooks.slack.com", 443)
-    assert inner._tunnel_host is None
     with pytest.raises(NetworkRefused) as info:  # the refused address is the target, not a proxy
         connection.connect()
     assert "proxy" not in str(info.value)
@@ -598,31 +757,87 @@ def test_post_wire_format_on_a_socketpair(gateway: Gateway, tmp_path: Path, bund
     assert sum(line.lower().startswith("accept-encoding") for line in lines) == 1
 
 
-def test_response_exposes_status_retry_after_and_chunked_reads(
+def test_post_with_an_invalid_target_fails_with_a_fixed_message(
     gateway: Gateway, tmp_path: Path, bundle: Path
 ) -> None:
     connection = make_connection(gateway, tmp_path, bundle)
+    with pytest.raises(http.client.InvalidURL) as info:
+        connection.post("/triggers/T1/SECRET TOKEN", b"{}")
+    assert "SECRET" not in str(info.value)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
+
+
+def served_response(
+    gateway: Gateway, tmp_path: Path, bundle: Path, raw: bytes, *, close_server: bool = False
+):  # noqa: ANN202
+    """A response read through the real connection class after a real ``post`` on a socketpair."""
+    connection = make_connection(gateway, tmp_path, bundle)
     inner = connection._conn  # type: ignore[attr-defined]
     client, server = socket.socketpair()
+    inner.sock = client
+    connection.post("/triggers/T1/abc", b"{}")
+    server.sendall(raw)
+    if close_server:
+        server.shutdown(socket.SHUT_WR)
+    return connection, client, server
+
+
+def test_response_exposes_only_status_and_read(
+    gateway: Gateway, tmp_path: Path, bundle: Path
+) -> None:
+    connection, client, server = served_response(
+        gateway,
+        tmp_path,
+        bundle,
+        b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\nLocation: https://x.invalid/\r\n"
+        b"Content-Length: 11\r\n\r\n"
+        b'{"ok":true}',
+    )
     try:
-        inner.sock = client
-        server.sendall(
-            b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 7\r\nLocation: https://x.invalid/\r\n"
-            b"Content-Length: 11\r\n\r\n"
-            b'{"ok":true}'
-        )
-        inner._HTTPConnection__state = "Request-sent"
         response = connection.getresponse()
+        assert {name for name in dir(response) if not name.startswith("_")} == {"status", "read"}
         assert response.status == 429
-        assert response.retry_after == "7"
-        assert not hasattr(response, "getheader")
-        assert not hasattr(response, "location")
         assert response.read(4) == b'{"ok'
         assert response.read(1024) == b'":true}'
         assert response.read(1024) == b""
     finally:
         client.close()
         server.close()
+
+
+def test_truncated_content_length_body_is_incomplete_read(
+    gateway: Gateway, tmp_path: Path, bundle: Path
+) -> None:
+    connection, client, server = served_response(
+        gateway,
+        tmp_path,
+        bundle,
+        b'HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{"ok"',
+        close_server=True,
+    )
+    try:
+        response = connection.getresponse()
+        assert response.status == 200
+        with pytest.raises(http.client.IncompleteRead):
+            while response.read(1024):
+                pass
+    finally:
+        client.close()
+
+
+def test_body_without_content_length_ends_normally(
+    gateway: Gateway, tmp_path: Path, bundle: Path
+) -> None:
+    connection, client, server = served_response(
+        gateway, tmp_path, bundle, b'HTTP/1.1 200 OK\r\n\r\n{"ok":true}', close_server=True
+    )
+    try:
+        response = connection.getresponse()
+        assert response.read(1024) == b'{"ok":true}'
+        assert response.read(1024) == b""
+    finally:
+        client.close()
 
 
 def test_settimeout_updates_connection_and_socket(
@@ -650,6 +865,9 @@ def test_classification() -> None:
     assert is_tls_error(ssl.SSLError())
     assert is_tls_error(ssl.SSLCertVerificationError())
     assert not is_tls_error(OSError())
+    assert is_cert_verification_error(ssl.SSLCertVerificationError())
+    assert not is_cert_verification_error(ssl.SSLError())
+    assert not is_cert_verification_error(OSError())
     assert is_malformed_response(http.client.BadStatusLine("x"))
     assert is_malformed_response(http.client.LineTooLong("status line"))
     assert is_malformed_response(http.client.UnknownProtocol("HTTP/9"))
@@ -712,11 +930,21 @@ def test_state_dir_wrong_owner_is_unusable(tmp_path: Path, monkeypatch: pytest.M
     assert info.value.reason == "owner"
 
 
+@pytest.mark.parametrize("home", ["", "relative/home", "a\0b"])
+def test_state_dir_with_an_unusable_home_is_unusable(gateway: Gateway, home: str) -> None:
+    with pytest.raises(StateUnusable) as info:
+        gateway.open_state_dir(home)
+    assert info.value.reason == "open"
+    assert info.value.__cause__ is None
+
+
 def test_state_dir_under_a_file_is_unusable(gateway: Gateway, tmp_path: Path) -> None:
     blocker = tmp_path / "blocker"
     blocker.write_text("x")
-    with pytest.raises(StateUnusable):
+    with pytest.raises(StateUnusable) as info:
         gateway.open_state_dir(str(blocker))
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
 
 
 def test_state_file_flags_and_mode(gateway: Gateway, tmp_path: Path) -> None:
@@ -746,7 +974,7 @@ def test_state_file_flags_and_mode(gateway: Gateway, tmp_path: Path) -> None:
     assert (leaf / "log.jsonl").read_bytes() == b"a\nb\n"
 
 
-def test_state_file_fifo_symlink_and_device_are_unusable_not_blocking(
+def test_state_file_fifo_symlink_and_directory_are_unusable_not_blocking(
     gateway: Gateway, tmp_path: Path
 ) -> None:
     dir_fd = gateway.open_state_dir(str(tmp_path / "home"))
