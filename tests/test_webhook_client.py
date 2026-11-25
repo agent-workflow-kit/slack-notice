@@ -6,8 +6,10 @@ connection class on a private socketpair. Fake secrets are built at run time aro
 
 from __future__ import annotations
 
+import dataclasses
 import http.client
 import os
+import shutil
 import socket
 import ssl
 import subprocess
@@ -79,7 +81,7 @@ def test_events_order(fake_gateway: FakeGateway) -> None:
 @pytest.mark.parametrize(
     "attempt",
     [
-        Attempt(resolve_error=OSError(CANARY)),
+        Attempt(resolve_error=socket.gaierror(-2, "Name or service not known")),
         Attempt(connect_error=ConnectionRefusedError(CANARY)),
         Attempt(connect_delay=99.0),
         Attempt(tls_error=ssl.SSLError(CANARY)),
@@ -150,7 +152,12 @@ def test_getresponse_exception_is_phase_read_without_status(fake_gateway: FakeGa
 
 
 @pytest.mark.parametrize(
-    "exc", [http.client.BadStatusLine(CANARY), http.client.LineTooLong("status line")]
+    "exc",
+    [
+        http.client.BadStatusLine(CANARY),
+        http.client.LineTooLong("status line"),
+        http.client.HTTPException("got more than 100 headers"),
+    ],
 )
 def test_non_http_answer_is_flagged_malformed(fake_gateway: FakeGateway, exc: Exception) -> None:
     f = run(fake_gateway, Attempt(reply=exc)).failure
@@ -182,6 +189,24 @@ def test_hostile_class_name_is_not_reported(fake_gateway: FakeGateway) -> None:
     assert result.failure is not None and result.failure.error_class == "Exception"
 
 
+def test_str_subclass_class_name_is_normalized_to_an_exact_str(fake_gateway: FakeGateway) -> None:
+    class Sneaky(str):
+        __slots__ = ()
+
+        def encode(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            return b"Hostile"
+
+        def __str__(self) -> str:
+            return "Hostile"
+
+    exc_type = type("Plain", (OSError,), {})
+    exc_type.__name__ = Sneaky("Good")
+    assert type(exc_type.__name__) is Sneaky
+    result = run(fake_gateway, Attempt(connect_error=exc_type()))
+    assert result.failure is not None
+    assert type(result.failure.error_class) is str and result.failure.error_class == "Good"
+
+
 def test_result_holds_no_exception_or_traceback(fake_gateway: FakeGateway) -> None:
     result = run(fake_gateway, Attempt(connect_error=OSError(CANARY)))
     assert not any(isinstance(v, BaseException) for v in vars(result).values())
@@ -207,6 +232,20 @@ def test_before_write_false_abandons_without_writing(fake_gateway: FakeGateway) 
     assert result.abandoned and result.phase is Phase.CONNECT
     assert "post" not in fake_gateway.events
     assert fake_gateway.connections[0].closed
+
+
+def test_raising_before_write_propagates_after_close_and_writes_nothing(
+    fake_gateway: FakeGateway,
+) -> None:
+    def gate() -> bool:
+        raise RuntimeError("gate bug")
+
+    fake_gateway.script(Attempt())
+    with pytest.raises(RuntimeError, match="gate bug"):
+        post_once(fake_gateway, hook(), BODY, timeout=5.0, before_write=gate)
+    assert fake_gateway.connections[0].closed
+    assert "post" not in fake_gateway.events
+    fake_gateway.allow_unconsumed_script = True
 
 
 def test_before_write_not_called_when_connect_fails(fake_gateway: FakeGateway) -> None:
@@ -311,8 +350,22 @@ def test_redirect_is_returned_and_never_followed(fake_gateway: FakeGateway, stat
 
 
 def test_no_header_is_exposed_on_the_result() -> None:
-    names = {n for n in dir(webhook.AttemptResult) if not n.startswith("_")}
-    assert not any("retry" in n or "location" in n or "header" in n for n in names)
+    assert [f.name for f in dataclasses.fields(webhook.AttemptResult)] == [
+        "phase",
+        "status",
+        "body",
+        "body_too_long",
+        "failure",
+        "abandoned",
+    ]
+    assert [f.name for f in dataclasses.fields(webhook.Failure)] == [
+        "error_class",
+        "timeout",
+        "tls",
+        "cert_verification",
+        "malformed",
+        "no_usable_ca",
+    ]
 
 
 # --- connection hygiene ----------------------------------------------------------------------
@@ -361,15 +414,29 @@ def test_no_exception_context_leaks_into_the_result(fake_gateway: FakeGateway) -
 # --- the real connection class on a socketpair ------------------------------------------------
 
 
+class _NoOptSocket(socket.socket):
+    """A socket whose TCP options are no-ops: ``http.client`` sets TCP_NODELAY, which a unix
+    socketpair does not support. Nothing else is changed."""
+
+    def setsockopt(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return None
+
+
 class PairGateway(SystemGateway):
-    """The production gateway, except that ``connect`` adopts one end of a socketpair (no
-    resolution, no network). Everything else is the real code."""
+    """The production gateway over a private socketpair (no resolution, no network).
+
+    With ``tls`` (or a ``cafile``) the real ``HTTPSConnection.connect`` runs: only the
+    socket-creation seam ``_create_connection`` is replaced, so the destination it is asked for,
+    the timeout, ``server_hostname`` (SNI) and ``check_hostname`` are the production wiring.
+    Without TLS ``connect`` adopts the socket as is (the wire-format tests need plain HTTP)."""
 
     def __init__(self, sock: socket.socket, cafile: str | None = None, tls: bool = False) -> None:
         self._tls = tls or cafile is not None
         self._sock = sock
         self._cafile = cafile
         self.conns: list[object] = []
+        self.destinations: list[tuple[object, object]] = []
+        self.created: list[socket.socket] = []
 
     def tls_context(self) -> ssl.SSLContext:
         if self._cafile is None:
@@ -385,17 +452,23 @@ class PairGateway(SystemGateway):
         )
         inner = conn._conn  # type: ignore[attr-defined]
         sock = self._sock
-        context_ = context
-        plain = not self._tls
 
-        def connect() -> None:
-            if plain:
+        def create_connection(address, timeout=None, source_address=None):  # noqa: ANN001, ANN202
+            self.destinations.append((address, source_address))
+            adopted = _NoOptSocket(sock.family, sock.type, 0, fileno=sock.detach())
+            adopted.settimeout(timeout)
+            self.created.append(adopted)
+            return adopted
+
+        if self._tls:
+            inner._create_connection = create_connection
+        else:
+
+            def connect() -> None:
                 sock.settimeout(inner.timeout)
                 inner.sock = sock
-            else:
-                inner.sock = context_.wrap_socket(sock, server_hostname=host)
 
-        inner.connect = connect
+            inner.connect = connect
         self.conns.append(conn)
         return conn
 
@@ -410,6 +483,16 @@ def serve(server: socket.socket, reply: bytes, seen: list[bytes]) -> threading.T
                 if not chunk:
                     break
                 data += chunk
+            head, _, rest = data.partition(b"\r\n\r\n")
+            for line in head.split(b"\r\n"):
+                if line.lower().startswith(b"content-length:"):
+                    want = int(line.split(b":", 1)[1])
+                    while len(rest) < want:
+                        more = server.recv(4096)
+                        if not more:
+                            break
+                        rest += more
+                    data = head + b"\r\n\r\n" + rest
             seen.append(data)
             if reply:
                 server.sendall(reply)
@@ -422,7 +505,7 @@ def serve(server: socket.socket, reply: bytes, seen: list[bytes]) -> threading.T
     return thread
 
 
-def wire(reply: bytes, *, body: bytes = BODY):  # noqa: ANN202
+def wire(reply: bytes, *, body: bytes = BODY, conns: list[object] | None = None):  # noqa: ANN202
     client, server = socket.socketpair()
     seen: list[bytes] = []
     gw = PairGateway(client)
@@ -433,6 +516,8 @@ def wire(reply: bytes, *, body: bytes = BODY):  # noqa: ANN202
         thread.join(6)
         server.close()
         client.close()
+    if conns is not None:
+        conns.extend(gw.conns)
     return result, seen[0] if seen else b""
 
 
@@ -456,7 +541,7 @@ def test_wire_request_is_exactly_the_specified_bytes() -> None:
             f"Content-Length: {len(BODY)}",
         ]
     )
-    assert rest == BODY or rest == b""  # the body may arrive in the same or the next segment
+    assert rest == BODY
 
 
 @pytest.mark.parametrize(
@@ -482,8 +567,10 @@ def test_wire_redirect_location_is_never_read_or_followed() -> None:
     reply = (
         b"HTTP/1.1 302 Found\r\nLocation: https://elsewhere.invalid/x\r\nContent-Length: 0\r\n\r\n"
     )
-    result, _ = wire(reply)
+    conns: list[object] = []
+    result, _ = wire(reply, conns=conns)
     assert result.status == 302 and result.body == b""
+    assert len(conns) == 1  # exactly one connection was made
     assert CANARY not in repr(result) and "elsewhere" not in repr(result)
 
 
@@ -529,10 +616,71 @@ def test_wire_socket_is_closed_afterwards() -> None:
     assert len(os.listdir("/proc/self/fd")) <= before
 
 
-# --- real TLS verification failure on a socketpair --------------------------------------------
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b"HTTP/1.1 200 OK\r\nContent-Le",  # cut inside a header line
+        b"HTTP/1.1 200 OK\r\n",  # status line, then EOF before the blank line
+        b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n",  # headers never ended
+    ],
+)
+def test_wire_response_cut_inside_the_header_block_is_a_lost_response(reply: bytes) -> None:
+    result, _ = wire(reply)
+    assert result.phase is Phase.READ and result.status is None
+    f = result.failure
+    assert f is not None and f.error_class == "IncompleteRead" and not f.malformed
+
+
+def test_wire_too_many_headers_is_malformed() -> None:
+    result, _ = wire(b"HTTP/1.1 200 OK\r\n" + b"X: a\r\n" * 200 + b"\r\n")
+    f = result.failure
+    assert f is not None and f.malformed and f.error_class == "HTTPException"
+
+
+def test_wire_malformed_chunk_size_is_malformed_not_lost() -> None:
+    result, _ = wire(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nab\r\n0\r\n\r\n")
+    assert result.status == 200
+    f = result.failure
+    assert f is not None and f.malformed and f.error_class == "MalformedChunkSize"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n{"o',  # cut in a chunk
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",  # no chunk size at all
+        b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n{"ok"\r\n',  # no last chunk
+    ],
+)
+def test_wire_truncated_chunked_body_stays_incomplete_read(reply: bytes) -> None:
+    result, _ = wire(reply)
+    f = result.failure
+    assert result.status == 200 and f is not None
+    assert f.error_class == "IncompleteRead" and not f.malformed
+
+
+def test_wire_1xx_other_than_100_is_returned_as_its_status() -> None:
+    # TODO(#24): decide the mapping of a 1xx final answer; http.client only skips 100.
+    result, _ = wire(b"HTTP/1.1 101 Switching Protocols\r\nContent-Length: 0\r\n\r\n")
+    assert result.status == 101 and result.failure is None and result.body == b""
+
+
+def test_wire_chunked_without_the_final_crlf_is_accepted() -> None:
+    result, _ = wire(
+        b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n{"ok"\r\n6\r\n:true}\r\n0\r\n'
+    )
+    assert result.body == b'{"ok":true}' and result.failure is None
+
+
+# --- real TLS on a socketpair ------------------------------------------------------------------
 
 
 def make_cert(tmp_path: Path, name: str) -> tuple[Path, Path]:
+    """A self-signed certificate for ``name`` (SAN and CN), generated into ``tmp_path`` only."""
+    if shutil.which("openssl") is None:
+        if os.environ.get("CI"):
+            pytest.fail("the openssl CLI is required in CI")
+        pytest.skip("the openssl CLI is not installed")
     cert, key = tmp_path / f"{name}.c.pem", tmp_path / f"{name}.k.pem"
     proc = subprocess.run(  # noqa: S603
         [
@@ -559,8 +707,20 @@ def make_cert(tmp_path: Path, name: str) -> tuple[Path, Path]:
         check=False,
     )
     if proc.returncode != 0:
-        pytest.skip("openssl cannot generate a certificate here")
+        pytest.fail(f"openssl failed ({proc.returncode}): {proc.stderr.decode(errors='replace')}")
     return cert, key
+
+
+def server_context(cert: Path, key: Path) -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(str(cert), str(key))
+    return ctx
+
+
+@pytest.fixture(scope="module")
+def hooks_cert(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    return make_cert(tmp_path_factory.mktemp("hookscert"), "hooks.slack.com")
 
 
 @pytest.fixture
@@ -568,24 +728,67 @@ def selfsigned(tmp_path: Path) -> tuple[Path, Path]:
     return make_cert(tmp_path, "other.invalid")
 
 
+def tls_serve(
+    server: socket.socket,
+    ctx: ssl.SSLContext,
+    reply: bytes | None = None,
+    info: dict[str, object] | None = None,
+) -> threading.Thread:
+    """Handshake as the server; with ``reply``, read the request head, answer and close."""
+
+    def work() -> None:
+        try:
+            server.settimeout(5)
+            with ctx.wrap_socket(server, server_side=True) as tls:
+                if info is not None:
+                    info["version"] = tls.version()
+                if reply is None:
+                    tls.recv(10)
+                    return
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    chunk = tls.recv(4096)
+                    if not chunk:
+                        return
+                    data += chunk
+                tls.sendall(reply)
+                try:
+                    tls.unwrap()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_real_tls_to_the_right_name_succeeds_with_hardened_settings(
+    hooks_cert: tuple[Path, Path],
+) -> None:
+    cert, key = hooks_cert
+    client, server = socket.socketpair()
+    info: dict[str, object] = {}
+    thread = tls_serve(server, server_context(cert, key), OK, info)
+    gw = PairGateway(client, cafile=str(cert))
+    result = post_once(gw, hook(), BODY, timeout=5.0)
+    thread.join(6)
+    assert result.failure is None and result.status == 200 and result.body == b'{"ok":true}'
+    assert info["version"] in ("TLSv1.2", "TLSv1.3")
+    ctx = gw.tls_context()
+    assert ctx.check_hostname is True and ctx.verify_mode is ssl.CERT_REQUIRED
+    assert ctx.minimum_version >= ssl.TLSVersion.TLSv1_2
+    # the real connect() asked for exactly the fixed destination (no proxy, no other host)
+    assert gw.destinations == [(("hooks.slack.com", 443), None)]
+
+
 def test_real_tls_wrong_host_is_a_cert_verification_failure(
     selfsigned: tuple[Path, Path],
 ) -> None:
     cert, key = selfsigned
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.load_cert_chain(str(cert), str(key))
     client, server = socket.socketpair()
-
-    def serve_tls() -> None:
-        try:
-            server.settimeout(5)
-            with server_ctx.wrap_socket(server, server_side=True) as tls:
-                tls.recv(10)
-        except OSError:
-            pass
-
-    thread = threading.Thread(target=serve_tls, daemon=True)
-    thread.start()
+    thread = tls_serve(server, server_context(cert, key))
     gw = PairGateway(client, cafile=str(cert))  # trusted, but the name is not hooks.slack.com
     result = post_once(gw, hook(), BODY, timeout=5.0)
     thread.join(6)
@@ -599,25 +802,47 @@ def test_real_tls_untrusted_root_is_a_cert_verification_failure(
     selfsigned: tuple[Path, Path],
 ) -> None:
     cert, key = selfsigned
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.load_cert_chain(str(cert), str(key))
     client, server = socket.socketpair()
-
-    def serve_tls() -> None:
-        try:
-            server.settimeout(5)
-            with server_ctx.wrap_socket(server, server_side=True) as tls:
-                tls.recv(10)
-        except OSError:
-            pass
-
-    thread = threading.Thread(target=serve_tls, daemon=True)
-    thread.start()
+    thread = tls_serve(server, server_context(cert, key))
     gw = PairGateway(client, tls=True)  # a context that trusts nothing
     result = post_once(gw, hook(), BODY, timeout=5.0)
     thread.join(6)
     f = result.failure
     assert f is not None and f.tls and f.cert_verification
+
+
+def test_real_tls_handshake_with_a_silent_peer_times_out() -> None:
+    client, server = socket.socketpair()  # the peer never answers the ClientHello
+    gw = PairGateway(client, tls=True)
+    try:
+        result = post_once(gw, hook(), BODY, timeout=0.3)
+    finally:
+        server.close()
+    assert result.phase is Phase.CONNECT
+    f = result.failure
+    assert f is not None and f.timeout and not f.tls
+    assert gw.created and gw.created[0].fileno() == -1  # closed by post_once
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        b"HTTP/1.1 200 OK\r\nContent-Le",
+        b"HTTP/1.1 200 OK\r\n",
+    ],
+)
+def test_real_tls_response_cut_inside_the_header_block_is_a_lost_response(
+    hooks_cert: tuple[Path, Path], reply: bytes
+) -> None:
+    cert, key = hooks_cert
+    client, server = socket.socketpair()
+    thread = tls_serve(server, server_context(cert, key), reply)
+    gw = PairGateway(client, cafile=str(cert))
+    result = post_once(gw, hook(), BODY, timeout=5.0)
+    thread.join(6)
+    f = result.failure
+    assert result.status is None and f is not None
+    assert f.error_class == "IncompleteRead" and not f.malformed
 
 
 def test_environment_cannot_add_trust_or_a_proxy(
@@ -638,20 +863,8 @@ def test_environment_cannot_add_trust_or_a_proxy(
         ("SSLKEYLOGFILE", str(tmp_path / "keys.log")),
     ):
         monkeypatch.setenv(name, value)
-    server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_ctx.load_cert_chain(str(cert), str(key))
     client, server = socket.socketpair()
-
-    def serve_tls() -> None:
-        try:
-            server.settimeout(5)
-            with server_ctx.wrap_socket(server, server_side=True) as tls:
-                tls.recv(10)
-        except OSError:
-            pass
-
-    thread = threading.Thread(target=serve_tls, daemon=True)
-    thread.start()
+    thread = tls_serve(server, server_context(cert, key))
 
     class RealTrust(PairGateway):
         def tls_context(self) -> ssl.SSLContext:  # the production trust logic, as is
@@ -664,4 +877,8 @@ def test_environment_cannot_add_trust_or_a_proxy(
     assert result.status is None and f is not None and f.tls
     assert f.cert_verification or f.no_usable_ca
     assert gw.conns[0]._conn._tunnel_host is None  # type: ignore[attr-defined]
+    if f.cert_verification:  # a CA was found, so the real connect() ran
+        assert gw.destinations == [(("hooks.slack.com", 443), None)]
+    else:
+        assert gw.destinations == []
     assert not (tmp_path / "keys.log").exists()

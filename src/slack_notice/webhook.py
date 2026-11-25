@@ -29,6 +29,7 @@ from typing import NoReturn
 
 from slack_notice import __version__
 from slack_notice.gateway import (
+    Connection,
     Gateway,
     NoUsableCA,
     is_cert_verification_error,
@@ -190,7 +191,12 @@ class AttemptResult:
 
 
 def _failure(exc: Exception) -> Failure:
-    name = type(exc).__name__
+    # ``__name__`` can be a ``str`` subclass instance: use unbound ``str``/``bytes`` methods so
+    # that nothing of the subclass runs or is stored, and keep an exact ``str``.
+    try:
+        name = bytes.decode(str.encode(type(exc).__name__, "ascii"), "ascii")
+    except Exception:
+        name = "Exception"
     return Failure(
         error_class=name if _CLASS_NAME.fullmatch(name) else "Exception",
         timeout=is_timeout(exc),
@@ -213,7 +219,10 @@ def post_once(
 
     ``timeout`` is the per-operation socket timeout. ``before_write`` is the seam for the
     deadline gate: called after connect and before the first call that can put bytes on the
-    socket; ``False`` abandons the attempt (nothing written, ``abandoned`` true).
+    socket; ``False`` abandons the attempt (nothing written, ``abandoned`` true). An exception
+    raised by ``before_write`` is a bug in the gate, not a connect failure: it propagates after
+    the connection is closed and nothing is written (exit 1, internal error; the worker of #25
+    catches ``BaseException``).
     A failure is returned, not raised, whatever its class (the phase decides its meaning); only
     ``BaseException`` that is not an ``Exception`` (an interrupt) propagates, after the close.
 
@@ -221,8 +230,11 @@ def post_once(
     """
     # TODO(#25): derive the per-operation timeout of each phase from the deadline
     # (``connection.settimeout`` between phases) and run this in the daemon worker.
+    # TODO(#25): the worker running this may spin until the deadline (an endless 1xx or chunk
+    # trailer stream is not capped here); #25 must bound it by the deadline and ``os._exit``
+    # and never depend on this function's cooperation.
     phase = Phase.CONNECT
-    connection = None
+    connection: Connection | None = None
     status: int | None = None
     chunks: list[bytes] = []
     too_long = False
@@ -239,26 +251,31 @@ def post_once(
                 user_agent=f"slack-notice/{__version__}",
             )
             connection.connect()
+        except Exception as exc:
+            failure = _failure(exc)
+        # Outside the ``except``: a bug in the gate is not a connect failure and propagates.
+        if failure is None and connection is not None:
             if before_write is not None and not before_write():
                 abandoned = True
             else:
-                phase = Phase.WRITE
-                connection.post(target.path, body)
-                phase = Phase.READ
-                response = connection.getresponse()
-                status = response.status
-                total = 0
-                while True:
-                    chunk = response.read(min(CHUNK, BODY_CAP + 1 - total))
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total > BODY_CAP:
-                        too_long = True
-                        break
-        except Exception as exc:
-            failure = _failure(exc)
+                try:
+                    phase = Phase.WRITE
+                    connection.post(target.path, body)
+                    phase = Phase.READ
+                    response = connection.getresponse()
+                    status = response.status
+                    total = 0
+                    while True:
+                        chunk = response.read(min(CHUNK, BODY_CAP + 1 - total))
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        total += len(chunk)
+                        if total > BODY_CAP:
+                            too_long = True
+                            break
+                except Exception as exc:
+                    failure = _failure(exc)
     finally:
         if connection is not None:
             try:

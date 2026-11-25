@@ -40,7 +40,7 @@ import ssl
 import stat
 import time
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Protocol
 
 # Interface, "Input": at most 100 ms per slice so the main thread notices a deadline or signal;
 # a regular file is read in chunks of 64 KiB.
@@ -336,6 +336,59 @@ def build_tls_context(candidates: CaCandidates) -> ssl.SSLContext:
 # --- HTTPS ----------------------------------------------------------------------------------
 
 
+class MalformedChunkSize(http.client.HTTPException):
+    """A chunk-size line that is not hexadecimal: an answer arrived but is not valid HTTP (the
+    stock ``http.client`` reports it as a lost response, ``IncompleteRead``)."""
+
+
+_MAX_LINE = 65536  # http.client's own line limit
+
+
+class _HeaderLines:
+    """Reads lines from the response file and remembers whether the last one was end of file."""
+
+    def __init__(self, fp: Any) -> None:
+        self._fp = fp
+        self.at_eof = False
+
+    def readline(self, limit: int = -1) -> bytes:
+        line = self._fp.readline(limit)
+        self.at_eof = line == b""
+        return line
+
+
+class _StrictResponse(http.client.HTTPResponse):
+    """``HTTPResponse`` that does not accept a header block cut off by end of file as complete
+    and tells a malformed chunk size from a truncated body."""
+
+    def begin(self) -> None:
+        raw = self.fp
+        lines = _HeaderLines(raw)
+        self.fp = lines  # type: ignore[assignment]
+        try:
+            super().begin()
+        finally:
+            if self.fp is lines:
+                self.fp = raw
+        # ``parse_headers`` stops at end of file as at the blank line; only the blank line counts.
+        if lines.at_eof:
+            self.close()
+            raise http.client.IncompleteRead(b"")
+
+    def _read_next_chunk_size(self) -> int:
+        line = self.fp.readline(_MAX_LINE + 1)
+        if len(line) > _MAX_LINE:
+            raise http.client.LineTooLong("chunk size")
+        if not line:
+            raise ValueError("end of file")  # truncated: the caller maps it to IncompleteRead
+        line = line.split(b";", 1)[0]
+        try:
+            return int(line, 16)
+        except ValueError:
+            self.close()
+            raise MalformedChunkSize("invalid chunk size") from None
+
+
 class _HttpsResponse:
     def __init__(self, response: http.client.HTTPResponse) -> None:
         self._response = response
@@ -364,6 +417,7 @@ class _HttpsConnection:
     ) -> None:
         # No proxy tunnel is ever set and no environment is read. Constructing does not connect.
         self._conn = http.client.HTTPSConnection(host, port, timeout=timeout, context=context)
+        self._conn.response_class = _StrictResponse
         self._user_agent = user_agent
 
     def connect(self) -> None:

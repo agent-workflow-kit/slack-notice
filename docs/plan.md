@@ -5,7 +5,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). The issues f
 ## Conventions for every stage
 
 - **Gateway boundary.** All HTTP (`http.client`), TLS context, clock and lock-file access goes through `src/slack_notice/gateway.py`; modules never import `urllib`, `http`, `time`, `fcntl` or `subprocess` directly. Tests substitute a fake gateway.
-- **Fake gateway.** Process tests call `cli.main(argv, env, gateway)` with a fake gateway in-process, because the URL must be on `hooks.slack.com` and verification cannot be disabled; no test-only environment seam is allowed. The fake gateway supplies name resolution, the monotonic clock, the home directory and uid, input reading, state-directory access hooks where a test needs a hostile path, the CA path candidates, and a response script (each row of the interface's Webhook edge table, including a 200 with a wrong body, a 3xx and a 5xx), a delay, a stalled name resolution, a stall after the first byte, a trickled response, a TLS failure and a post-write failure. There are no real-socket tests. There are no sibling tools to pin.
+- **Fake gateway.** Process tests call `cli.main(argv, env, gateway)` with a fake gateway in-process, because the URL must be on `hooks.slack.com` and verification cannot be disabled; no test-only environment seam is allowed. The fake gateway supplies name resolution, the monotonic clock, the home directory and uid, input reading, state-directory access hooks where a test needs a hostile path, the CA path candidates, and a response script (each row of the interface's Webhook edge table, including a 200 with a wrong body, a 3xx and a 5xx), a delay, a stalled name resolution, a stall after the first byte, a trickled response, a TLS failure and a post-write failure. There are no tests on a network socket: the wire-format and TLS tests run the real connection class over an in-process socketpair (the TLS ones need the `openssl` CLI to make a certificate) and never open or resolve a real address. There are no sibling tools to pin.
 - **Process and live split.** Only the `live` tests (pytest marker, never in CI) touch the network: they post to the maintainer's own workflow and are listed in the live-verification issue.
 - **Golden files.** `--json` outputs, rendered bodies and log records have golden files; a golden hash test (fixed input, expected `message_sha256`) and a golden serialization test (`ensure_ascii=False`, compact separators, key order); schemas have positive and negative samples.
 - **Spike regressions.** Every behavior in design.md's live-verification table becomes a fake-gateway test or a `live` test.
@@ -24,7 +24,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). The issues f
 | `payload.py` | 2 | Input reading, validation, sanitizer, link rule. |
 | `render.py` | 2 | Body layout and cuts. |
 | `spacing.py` | 3 | Send lock and 1 s spacing. |
-| `webhook.py` | 3 | URL allowlist, request, response mapping, retries, deadline. |
+| `webhook.py` | 3 | URL allowlist, one attempt (`post_once`, `AttemptResult`, `Phase`, `Failure`; #23), response mapping, retries, deadline. |
 
 ## Stage 0: Scaffold and gateway
 
