@@ -80,7 +80,9 @@ def gateway() -> Gateway:
 # --- import rule ----------------------------------------------------------------------------
 
 
-BANNED_ROOTS = frozenset({"urllib", "http", "time", "fcntl", "subprocess", "importlib"})
+BANNED_ROOTS = frozenset(
+    {"urllib", "http", "time", "fcntl", "subprocess", "importlib", "posix", "nt"}
+)
 ENVIRONMENT_NAMES = frozenset({"environ", "environb", "getenv", "putenv"})
 PROCESS_NAMES = frozenset({"system", "popen"})
 PROCESS_PREFIXES = ("spawn", "exec", "fork", "posix_spawn")
@@ -172,6 +174,11 @@ def banned_references(source: str) -> list[str]:
         "from time import monotonic",
         "from time import *",
         "import fcntl",
+        "import posix",
+        "import posix as p\np.environ",
+        "from posix import environ",
+        "import nt",
+        "from nt import environ",
         "from fcntl import flock",
         "import subprocess",
         "import subprocess as sp",
@@ -245,6 +252,116 @@ def test_only_the_gateway_references_network_clock_lock_or_process_modules() -> 
         if path.name != "gateway.py"
     }
     assert {name: found for name, found in offenders.items() if found} == {}
+
+
+ENV_MAPPING_NAMES = frozenset({"env", "environ", "environment"})
+ENV_READ_METHODS = frozenset({"get", "pop", "setdefault"})
+
+
+def _is_env_mapping(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in ENV_MAPPING_NAMES
+    if isinstance(node, ast.Attribute):
+        return node.attr in ENV_MAPPING_NAMES
+    return False
+
+
+def _is_str_literal(node: ast.expr | None) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def literal_env_keys(source: str) -> list[str]:
+    """Reads of an environment mapping (``env``, ``environ``, ``environment``, or an attribute of
+    that name) with a string-literal key: ``env["X"]``, ``env.get("X")`` and the like. The
+    credential's name comes from the config (``webhook_env``), never from the code."""
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Subscript) and _is_env_mapping(node.value):
+            if _is_str_literal(node.slice):
+                found.append(ast.unparse(node))
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ENV_READ_METHODS
+            and _is_env_mapping(node.func.value)
+            and node.args
+            and _is_str_literal(node.args[0])
+        ):
+            found.append(ast.unparse(node))
+    return found
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "env['SLACK_WEBHOOK']",
+        "ctx.env['SLACK_WEBHOOK']",
+        "env.get('SLACK_WEBHOOK')",
+        "self.env.get('X', '')",
+        "environ.pop('X')",
+        "environment.setdefault('X', 'y')",
+    ],
+)
+def test_literal_env_key_checker_detects_reads(source: str) -> None:
+    assert literal_env_keys(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "env[name]",
+        "ctx.env.get(config.webhook_env)",
+        "env.get(name, 'default')",
+        "other['X']",
+        "settings.get('X')",
+        "env == {}",
+    ],
+)
+def test_literal_env_key_checker_accepts_other_code(source: str) -> None:
+    assert literal_env_keys(source) == []
+
+
+def test_no_module_reads_an_environment_mapping_with_a_literal_key() -> None:
+    offenders = {
+        str(path.relative_to(SRC)): literal_env_keys(path.read_text())
+        for path in sorted(SRC.rglob("*.py"))
+    }
+    assert {name: found for name, found in offenders.items() if found} == {}
+
+
+def environ_call_sites(source: str) -> list[str]:
+    """The enclosing function of every ``<expr>.environ(...)`` call (``<module>`` at top level)."""
+    tree = ast.parse(source)
+    sites: list[str] = []
+
+    def visit(node: ast.AST, scope: str) -> None:
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            scope = node.name
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "environ"
+        ):
+            sites.append(scope)
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(tree, "<module>")
+    return sites
+
+
+def test_environ_call_checker_reports_the_enclosing_function() -> None:
+    source = "def main(g):\n    return g.environ()\n\nx = g.environ()\n"
+    assert environ_call_sites(source) == ["main", "<module>"]
+    assert environ_call_sites("def f(g):\n    return g.environ\n") == []
+
+
+def test_the_gateway_environment_is_read_only_by_cli_main() -> None:
+    sites = {
+        str(path.relative_to(SRC)): environ_call_sites(path.read_text())
+        for path in sorted(SRC.rglob("*.py"))
+    }
+    assert {name: found for name, found in sites.items() if found} == {"cli.py": ["main"]}
 
 
 def test_gateway_itself_is_scanned_and_uses_the_modules() -> None:

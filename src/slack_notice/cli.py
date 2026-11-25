@@ -9,7 +9,11 @@ Rules kept here (interface: Global flags, Output, Exit codes, Error envelope):
   before it (the subparser copies use ``default=SUPPRESS``).
 - Flags are exact: no abbreviations (``allow_abbrev=False``). ``--`` is refused (no command
   takes a positional). A single-value flag given twice is refused rather than last-wins.
-- ``--json`` is looked for in argv before parsing, so a usage error prints the envelope.
+- ``--json`` (also spelled ``--json=...``, which argparse then refuses) is looked for in argv
+  before parsing, so a usage error prints the envelope.
+- A CliError is a result: a write failure on either stream keeps its exit code (each of the
+  envelope and the stderr line is tried on its own). Only a failure with no result (``--help``
+  or ``--version`` output, an internal error) is exit 1.
 - Every message printed here is a fixed string: argparse's own messages quote the input and are
   never shown. No variable is read from the environment (``env`` is only carried for later
   issues; even the help width is fixed so argparse never reads ``COLUMNS``).
@@ -34,7 +38,7 @@ from slack_notice import __version__
 from slack_notice.gateway import Gateway, SystemGateway
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
-ERROR_EXIT_CODES = frozenset({1, 2, 12, 20, 22})
+ERROR_EXIT_CODES = frozenset({1, 2, 12, 20})
 
 ACTOR_PATTERN = re.compile(r"(human|auto):[A-Za-z0-9._@/-]{1,64}")
 LOGIN_DISALLOWED = re.compile(r"[^A-Za-z0-9._@-]")
@@ -42,7 +46,8 @@ CLASS_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 USAGE_MESSAGE = "invalid command line (see slack-notice --help)"
 
-# Flags that take one value and may be given once.
+# Flags that take one value and may be given once. ``--decision-id`` takes one value too, but
+# may repeat.
 SINGLE_VALUE_FLAGS = (
     "--config",
     "--actor",
@@ -53,6 +58,7 @@ SINGLE_VALUE_FLAGS = (
     "--link",
     "--dedupe-key",
 )
+VALUE_FLAGS = frozenset(SINGLE_VALUE_FLAGS) | {"--decision-id"}
 
 
 # --- errors -----------------------------------------------------------------------------------
@@ -227,7 +233,7 @@ class Output:
 @dataclass
 class Context:
     args: argparse.Namespace
-    env: Mapping[str, str]
+    env: Mapping[str, str] = field(repr=False)  # holds the credential
     gateway: Gateway
     output: Output
     json: bool
@@ -306,6 +312,9 @@ def build_parser() -> argparse.ArgumentParser:
         # A fixed width: the default reads COLUMNS from the environment.
         "formatter_class": functools.partial(argparse.HelpFormatter, width=80),
     }
+    if sys.version_info >= (3, 14):
+        # Python 3.14 colours help from NO_COLOR, FORCE_COLOR and TERM; no variable is read.
+        common["color"] = False
     parser = _Parser(
         prog="slack-notice",
         description="Send one plain-text notification to Slack through a workflow webhook trigger.",
@@ -333,12 +342,36 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _prescan(argv: Sequence[str]) -> None:
-    """Refusals that need no parsing: a `--` separator and a repeated single-value flag."""
-    if "--" in argv:
-        raise usage_error()
-    for flag in SINGLE_VALUE_FLAGS:
-        if sum(1 for a in argv if a == flag or a.startswith(flag + "=")) > 1:
+    """Refusals that need no parsing: a `--` separator, a repeated single-value flag and a
+    separate value that starts with `-` (such a value uses the `=` form; `-` alone is a value).
+
+    A walk over the tokens: a value flag given without `=` consumes the next token as its value,
+    so a value is never counted as a flag.
+    """
+    seen: set[str] = set()
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        i += 1
+        if token == "--":
             raise usage_error()
+        name, equals, _ = token.partition("=")
+        if name not in VALUE_FLAGS:
+            continue
+        if name in SINGLE_VALUE_FLAGS:
+            if name in seen:
+                raise usage_error()
+            seen.add(name)
+        if equals or i >= len(argv):
+            continue  # a missing value is argparse's to report
+        if argv[i].startswith("-") and argv[i] != "-":
+            raise usage_error()
+        i += 1
+
+
+def json_requested(argv: Sequence[str]) -> bool:
+    """`--json` or a `--json=...` spelling (argparse refuses it, now with the envelope)."""
+    return any(a == "--json" or a.startswith("--json=") for a in argv)
 
 
 def parse(argv: Sequence[str]) -> argparse.Namespace:
@@ -350,8 +383,8 @@ def parse(argv: Sequence[str]) -> argparse.Namespace:
         raise usage_error("--verbose and --quiet cannot be combined")
     if args.actor is not None and ACTOR_PATTERN.fullmatch(args.actor) is None:
         raise usage_error("--actor must be human:<name> or auto:<name>")
-    if args.config == "":
-        raise usage_error("--config needs a path")
+    # TODO(#10): an empty --config path is a missing file: config_invalid with details.key
+    # --config (exit 2), decided by config loading and not here.
     # TODO(#16): flag combinations of send and the checks of the flag values.
     return args
 
@@ -398,7 +431,7 @@ def _run(
         env=env,
         gateway=gateway,
         output=Output(streams, verbose=args.verbose, quiet=args.quiet),
-        json="--json" in argv,
+        json=json_requested(argv),
         dry_run=args.dry_run,
         verbose=args.verbose,
         quiet=args.quiet,
@@ -414,6 +447,9 @@ def _emit(output: Output, outcome: _EarlyExit | CliError, *, json_mode: bool) ->
     if isinstance(outcome, _EarlyExit):
         output.out(outcome.text)
         return
+    # A CliError is the result: it counts as printed, so a failing stream never replaces its
+    # exit code, and the envelope and the stderr line are each tried on their own.
+    output.result_printed()
     if json_mode:
         output.json_document(outcome.envelope())
     output.error_line(outcome.stderr_line())
@@ -429,7 +465,7 @@ def main(
     gateway = SystemGateway() if gateway is None else gateway
     env = gateway.environ() if env is None else env
     streams = system_streams() if streams is None else streams
-    json_mode = "--json" in argv
+    json_mode = json_requested(argv)
     holder: list[Context] = []
     outcome: _EarlyExit | CliError | None = None
     code = 0

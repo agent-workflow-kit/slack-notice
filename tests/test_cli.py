@@ -202,7 +202,6 @@ BAD_COMMAND_LINES = [
     pytest.param(["--verbose", "--quiet", "send"], id="verbose-and-quiet"),
     pytest.param(["send", "--quiet", "--verbose"], id="verbose-and-quiet-after"),
     pytest.param(["--verbose", "send", "--quiet"], id="verbose-before-quiet-after"),
-    pytest.param(["--config", "", "send"], id="empty-config-path"),
     pytest.param(["send", "--actor", "auto:a", "--actor", "auto:b"], id="repeated-actor"),
     pytest.param(["--actor", "auto:a", "send", "--actor", "auto:b"], id="actor-before-and-after"),
     pytest.param(["--actor=auto:a", "--actor", "auto:b", "send"], id="repeated-actor-forms"),
@@ -218,7 +217,7 @@ def test_usage_error_exits_two_with_one_fixed_stderr_line(
 ) -> None:
     result = run(argv, fake_gateway)
     assert result.code == 2
-    if "--json" not in argv:
+    if not cli.json_requested(argv):
         assert result.out == b""
     assert result.stderr.count("\n") == 1
     assert result.stderr.startswith("usage: ")
@@ -289,6 +288,68 @@ def test_json_inside_a_flag_value_is_not_the_flag(fake_gateway: FakeGateway) -> 
     result = run(["--bogus", "--title=--json"], fake_gateway)
     assert result.code == 2
     assert result.out == b""
+
+
+@pytest.mark.parametrize("spelling", ["--json=x", "--json=true", "--json="])
+def test_json_equals_spellings_get_the_usage_envelope(
+    spelling: str, fake_gateway: FakeGateway
+) -> None:
+    # argparse rejects the spelling (a switch takes no value); the envelope is still printed.
+    result = run([spelling, "send"], fake_gateway)
+    assert result.code == 2
+    assert assert_valid("cli/error", result.out)["error"]["code"] == "usage"
+
+
+def test_a_flag_value_that_merely_starts_with_json_equals_is_not_json_mode(
+    fake_gateway: FakeGateway,
+) -> None:
+    result = run(["--bogus", "--title=--json=x"], fake_gateway)
+    assert result.code == 2
+    assert result.out == b""
+
+
+def test_empty_config_path_is_parsed_and_reaches_the_handler(
+    captured: list[Context], fake_gateway: FakeGateway
+) -> None:
+    # An empty path is a missing file (config_invalid, details.key --config), judged by config
+    # loading (#10), not a usage error.
+    assert run(["--config=", "send"], fake_gateway).code == 0
+    assert captured[0].config == ""
+    assert run(["--config", "", "validate"], fake_gateway).code == 0
+    assert captured[1].config == ""
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["send", "--title", "-5"],
+        ["send", "--message", "-x y"],
+        ["send", "--message", "--title=a b", "--title", "t"],
+        ["--actor", "-x", "send"],
+        ["send", "--title", "--message", "m"],
+        ["send", "--message", "--"],
+    ],
+)
+def test_a_separate_value_starting_with_a_dash_is_a_usage_error(
+    argv: list[str], fake_gateway: FakeGateway
+) -> None:
+    assert run(argv, fake_gateway).code == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["send", "--file", "-"],
+        ["send", "--title", "a", "--message", "b", "--decision-id", "x", "--decision-id", "y"],
+        ["send", "--message=--title=a", "--title", "t"],
+        ["send", "--message", "title is text"],
+        ["send", "--dry-run", "--dry-run", "--json", "--json"],
+    ],
+)
+def test_values_are_skipped_when_repeats_are_counted(
+    argv: list[str], captured: list[Context], fake_gateway: FakeGateway
+) -> None:
+    assert run(argv, fake_gateway).code == 0
 
 
 # --- global flags ---------------------------------------------------------------------------
@@ -728,7 +789,7 @@ def test_errors_are_printed_under_quiet(
 
 
 def test_cli_error_rejects_an_exit_code_the_interface_does_not_use() -> None:
-    for bad in (3, 10, 11, 13, 21, 128 + 15):
+    for bad in (3, 10, 11, 13, 21, 22, 128 + 15):
         with pytest.raises(ValueError, match="exit code"):
             CliError(bad, "usage", "m")
 
@@ -765,6 +826,47 @@ def test_each_write_is_flushed(fake_gateway: FakeGateway) -> None:
     output.out("a")
     output.err("b")
     assert (out.flushes, err.flushes) == (1, 1)
+
+
+@pytest.mark.parametrize("exc", [BrokenPipeError(32, "x"), OSError(5, "x"), ValueError("closed")])
+def test_a_usage_error_keeps_exit_two_when_stdout_fails(
+    exc: Exception, fake_gateway: FakeGateway
+) -> None:
+    err = io.BytesIO()
+    result = run(["--json", "bogus"], fake_gateway, out=FailingSink(exc), err=err)
+    assert result.code == 2
+    assert result.stderr == USAGE_LINE
+
+
+@pytest.mark.parametrize("exc", [BrokenPipeError(32, "x"), OSError(5, "x"), ValueError("closed")])
+def test_a_usage_error_keeps_exit_two_when_stderr_fails_and_stdout_still_gets_the_envelope(
+    exc: Exception, fake_gateway: FakeGateway
+) -> None:
+    out = io.BytesIO()
+    result = run(["--json", "bogus"], fake_gateway, out=out, err=FailingSink(exc))
+    assert result.code == 2
+    assert assert_valid("cli/error", result.out)["error"]["code"] == "usage"
+
+
+def test_a_usage_error_keeps_exit_two_when_both_streams_fail(fake_gateway: FakeGateway) -> None:
+    out, err = FailingSink(OSError(5, "x")), FailingSink(OSError(5, "x"))
+    assert run(["--json", "bogus"], fake_gateway, out=out, err=err).code == 2
+    assert (out.writes, err.writes) == (1, 1)
+
+
+def test_a_handler_error_keeps_its_exit_code_when_a_stream_fails(
+    monkeypatch: pytest.MonkeyPatch, fake_gateway: FakeGateway
+) -> None:
+    error = CliError(20, "refused", "m", reason="invalid_payload")
+    monkeypatch.setitem(cli.HANDLERS, "send", raising(error))
+    out = FailingSink(BrokenPipeError(32, "x"))
+    assert run(["--json", "send"], fake_gateway, out=out).code == 20
+
+
+def test_a_help_write_failure_is_exit_one(fake_gateway: FakeGateway) -> None:
+    result = run(["--help"], fake_gateway, out=FailingSink(OSError(5, "x")))
+    assert result.code == 1
+    assert result.stderr == "internal: internal error (OSError)\n"
 
 
 @pytest.mark.parametrize("exc", [BrokenPipeError(32, "x"), OSError(5, "x"), ValueError("closed")])
@@ -888,9 +990,9 @@ def test_python_dash_m_usage_error_with_json(tmp_path: Path) -> None:
     assert result.stderr == USAGE_LINE.encode()
 
 
-def test_python_dash_m_closed_stdout_keeps_the_exit_code(tmp_path: Path) -> None:
-    # A closed stdout (EBADF) while printing the usage envelope is an internal error before
-    # step 6, but must not turn into the interpreter's 120 at shutdown.
+def test_python_dash_m_version_with_closed_stdout_is_exit_one(tmp_path: Path) -> None:
+    # --version has no result code to keep: a closed stdout (EBADF) while printing it is an
+    # internal error (exit 1), and must not turn into the interpreter's 120 at shutdown.
     home = tmp_path / "subhome2"
     home.mkdir()
     env = {
@@ -910,6 +1012,58 @@ def test_python_dash_m_closed_stdout_keeps_the_exit_code(tmp_path: Path) -> None
     )  # fmt: skip
     assert result.returncode == 1
     assert result.stderr == b"internal: internal error (OSError)\n"
+
+
+def test_python_dash_m_usage_error_with_closed_stdout_keeps_exit_two(tmp_path: Path) -> None:
+    home = tmp_path / "subhome3"
+    home.mkdir()
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", "import os,sys; os.close(1); from slack_notice.cli import main;"
+         " sys.exit(main(['--json', 'bogus']))"],
+        env=env,
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )  # fmt: skip
+    assert result.returncode == 2
+    assert result.stderr == USAGE_LINE.encode()
+
+
+def test_repr_of_the_context_holds_no_environment_value(
+    captured: list[Context], fake_gateway: FakeGateway
+) -> None:
+    assert run(["send"], fake_gateway, env={"SLACK_WEBHOOK": SECRET}).code == 0
+    assert "T0SECRET" not in repr(captured[0])
+    assert captured[0].env == {"SLACK_WEBHOOK": SECRET}
+
+
+@pytest.mark.parametrize(
+    "variables",
+    [
+        {"NO_COLOR": "1"},
+        {"FORCE_COLOR": "1"},
+        {"TERM": "xterm-256color", "FORCE_COLOR": "1"},
+        {"TERM": "dumb"},
+        {"COLUMNS": "20"},
+    ],
+)
+def test_help_text_does_not_depend_on_color_or_terminal_variables(
+    variables: dict[str, str], monkeypatch: pytest.MonkeyPatch, fake_gateway: FakeGateway
+) -> None:
+    for name in ("NO_COLOR", "FORCE_COLOR", "TERM", "COLUMNS"):
+        monkeypatch.delenv(name, raising=False)
+    plain = [run(argv, fake_gateway).out for argv in (["--help"], ["send", "--help"])]
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    assert [run(argv, fake_gateway).out for argv in (["--help"], ["send", "--help"])] == plain
+    assert all(b"\x1b" not in text for text in plain)
 
 
 def test_env_defaults_to_the_gateways_environment(captured: list[Context], tmp_path: Path) -> None:
