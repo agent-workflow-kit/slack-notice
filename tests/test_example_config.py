@@ -113,13 +113,15 @@ def test_every_schema_property_and_every_level_appears_in_the_example() -> None:
 # --- the example is a template: no secret, no real host -----------------------------------------
 
 URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://|\bwww\.", re.IGNORECASE)
-# Any dotted name whose last label is alphabetic (2+ letters) is a host, except file names with one
-# of the extensions the example legitimately contains.
+# Any dotted name whose last label is alphabetic (2+ letters) is a host, except the exact file names
+# the example contains. Bare extensions are not exempt: "evil.md" or "db.key" is a hostname.
 DOTTED = re.compile(r"\b[a-z0-9_-]+(?:\.[a-z0-9_-]+)*\.([a-z]{2,})\b", re.IGNORECASE)
-FILE_EXTENSIONS = frozenset({"yaml", "yml", "json", "jsonl", "md", "py", "toml", "txt", "key"})
+EXAMPLE_FILENAMES = frozenset({"config.yaml", "details.key", "config.json", "log.jsonl"})
 LOCALHOST = re.compile(r"\blocalhost\b", re.IGNORECASE)
 HOST_PORT = re.compile(r"\b[a-z][a-z0-9-]*:\d{2,5}\b", re.IGNORECASE)
 USER_AT_HOST = re.compile(r"\b[\w.+-]+@[\w-]+", re.IGNORECASE)
+# Trade-off: a 32+ char run only counts as a token if it holds a capital or a digit, so path-like
+# text does not trip it; an all-lowercase run (path-like or not) is deliberately not flagged.
 TOKEN = re.compile(
     r"\bxox[a-z]-"
     r"|(?=[A-Za-z0-9+/_.=-]*[A-Z0-9])[A-Za-z0-9+/_.=-]{32,}"  # needs a capital or digit: not a path
@@ -140,7 +142,7 @@ PLAIN_PATTERNS = (URL, LOCALHOST, HOST_PORT, USER_AT_HOST, TOKEN, IPV4, IPV6)
 def leaks(text: str) -> list[str]:
     found = [m.group(0) for pattern in PLAIN_PATTERNS for m in pattern.finditer(text)]
     found += [
-        m.group(0) for m in DOTTED.finditer(text) if m.group(1).lower() not in FILE_EXTENSIONS
+        m.group(0) for m in DOTTED.finditer(text) if m.group(0).lower() not in EXAMPLE_FILENAMES
     ]
     return found
 
@@ -174,6 +176,12 @@ def _dotted(*labels: str) -> str:
         "# " + _dotted("a", "tech"),
         "# " + _dotted("a", "me"),
         "# " + _dotted("a", "sh"),
+        "# " + _dotted("evil", "md"),
+        "# " + _dotted("foo", "py"),
+        "# " + _dotted("db", "key"),
+        "# " + _dotted("a", "txt"),
+        "# " + _dotted("a", "toml"),
+        "# " + _dotted("a", "yml"),
         "# " + _dotted("a", "fr"),
         "# " + _dotted("a", "ru"),
         "# " + _dotted("a", "ch"),
@@ -208,6 +216,7 @@ def test_the_leak_scan_catches_what_it_is_for(text: str) -> None:
         "# version 0.6.0 and 1.5 seconds",
         "# a short Bearer word",
         "level: 10",
+        "# " + "/".join(["a" * 12, "b" * 12, "c" * 12]),  # 32+ lowercase path-like: not a token
     ],
 )
 def test_the_leak_scan_leaves_ordinary_text_alone(text: str) -> None:
