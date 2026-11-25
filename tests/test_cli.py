@@ -169,7 +169,10 @@ def test_help_lists_the_exact_flags(fake_gateway: FakeGateway) -> None:
         "--version",
     ):
         assert flag in send_help
-    assert "--test-message" in run(["validate", "--help"], fake_gateway).stdout
+    validate_help = run(["validate", "--help"], fake_gateway).stdout
+    assert "--test-message" in validate_help
+    expected = "send one real test notification to Slack (logged like a send)"
+    assert expected in " ".join(validate_help.split())
 
 
 # --- usage errors -------------------------------------------------------------------------

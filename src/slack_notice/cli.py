@@ -507,7 +507,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     validate = commands.add_parser("validate", help="check the config and the credential", **common)
     _add_global_flags(validate, top=False)
-    validate.add_argument("--test-message", action="store_true", help="send one test message")
+    validate.add_argument(
+        "--test-message",
+        action="store_true",
+        help="send one real test notification to Slack (logged like a send)",
+    )
     return parser
 
 
