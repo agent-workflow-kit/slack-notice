@@ -265,3 +265,35 @@ def test_reserve_std_fds_reopens_a_closed_descriptor_on_dev_null_and_leaves_open
                 os.close(fd)
             except OSError:
                 pass
+
+
+def test_the_reopened_descriptor_is_read_write_on_dev_null() -> None:
+    probe = os.dup(0)
+    os.close(probe)
+    try:
+        reserve_std_fds((probe,))
+        assert os.write(probe, b"x") == 1  # writes are swallowed ...
+        assert os.read(probe, 1) == b""  # ... and reads see end of file
+    finally:
+        try:
+            os.close(probe)
+        except OSError:
+            pass
+
+
+@pytest.mark.parametrize("argv", [None, ["send"]])
+def test_reserve_std_fds_runs_at_the_process_entry_only(
+    argv: list[str] | None, monkeypatch: pytest.MonkeyPatch, fake_gateway: FakeGateway
+) -> None:
+    calls: list[int] = []
+    real = cli._exit_on_signal  # pyright: ignore[reportPrivateUsage]
+
+    def restoring(gate: Any, restore: bool = True) -> Any:
+        return real(gate, restore=True)  # never leave a handler behind in the test run
+
+    monkeypatch.setattr(cli, "reserve_std_fds", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(cli, "_exit_on_signal", restoring)
+    monkeypatch.setattr(cli, "_main", lambda *a, **k: 0)
+    monkeypatch.setattr("sys.argv", ["slack-notice"])
+    cli.main(argv, {}, fake_gateway)
+    assert calls == ([1] if argv is None else [])
