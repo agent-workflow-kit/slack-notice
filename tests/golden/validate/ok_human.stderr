@@ -1,0 +1,2 @@
+config: ok (configuration is valid)
+credential: ok (the webhook credential is set and has the form of a workflow trigger URL)

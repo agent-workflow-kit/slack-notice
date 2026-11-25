@@ -1,0 +1,1 @@
+config_invalid: max_chars must be an integer from 2000 to 12000
