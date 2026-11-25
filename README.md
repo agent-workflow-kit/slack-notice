@@ -114,6 +114,7 @@ No other awkit tool. Python standard library (`http.client`) for HTTP; PyYAML an
 
 - [docs/interface.md](docs/interface.md): normative interface
 - [docs/plan.md](docs/plan.md): staged implementation plan
+- [docs/live-testing.md](docs/live-testing.md): the live suite against your own workflow (never in CI)
 - [docs/design.md](docs/design.md): decisions and internals
 - [awkit architecture](../awkit-docs/architecture.md) ([published](https://github.com/agent-workflow-kit/awkit-docs/blob/main/architecture.md))
 - [awkit design guide](../awkit-docs/design-guide.md) ([published](https://github.com/agent-workflow-kit/awkit-docs/blob/main/design-guide.md))

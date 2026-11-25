@@ -88,3 +88,12 @@ def fake_gateway(tmp_path: Path) -> Iterator[FakeGateway]:
     gateway.release_stalls()  # a daemon worker blocked in a stall must not outlive the test
     # A contract violation inside a worker thread would only surface as an exit 1 "internal".
     gateway.assert_clean()
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]) -> Iterator[None]:
+    """Keep each phase's report on the item (``item.rep_call``): the live suite's report reads
+    the outcome of its tests from it. No effect on any other test."""
+    outcome = yield
+    report = outcome.get_result()
+    setattr(item, "rep_" + report.when, report)
