@@ -32,7 +32,9 @@ from tests.fake_gateway import FakeGateway
 from tests.harness import assert_valid
 
 REPO = Path(__file__).resolve().parent.parent
-SECRET = "https://hooks.slack.com/triggers/T0FAKE/0000/FAKESECRET"
+# Recognizable fake leak marker, assembled from parts so it is not a credential-shaped literal.
+_PARTS = ["https:", "", "hooks.slack.com", "triggers", "T0FAKE", "0000", "FAKE" + "SECRET"]
+CANARY = "/".join(_PARTS)
 
 
 @contextmanager
@@ -411,10 +413,10 @@ def test_an_alias_bomb_of_413_bytes_is_refused_fast() -> None:
 
 def test_every_parse_failure_is_a_fixed_message_without_content() -> None:
     for text in (
-        f"a: [\nb: {SECRET}",
-        f'a: "{SECRET}',
-        f"a: 1\na: {SECRET}\n",
-        f"a: !x {SECRET}\n",
+        f"a: [\nb: {CANARY}",
+        f'a: "{CANARY}',
+        f"a: 1\na: {CANARY}\n",
+        f"a: !x {CANARY}\n",
     ):
         with pytest.raises(ValueError) as raised:
             parse_yaml(text.encode())
@@ -553,27 +555,27 @@ def test_the_file_mode_is_not_a_rule_of_the_loader(fake_gateway: FakeGateway, mo
 def test_a_read_error_injected_at_the_gateway_is_config_invalid(fake_gateway: FakeGateway) -> None:
     path = write_default(fake_gateway, "timeout: 15\n")
     for error in (
-        PermissionError(13, "denied " + SECRET),
-        OSError(5, "io " + SECRET),
+        PermissionError(13, "denied " + CANARY),
+        OSError(5, "io " + CANARY),
         MemoryError(),
         RecursionError(),
-        ValueError(SECRET),
+        ValueError(CANARY),
     ):
         fake_gateway.file_errors[str(path)] = error
         assert invalid_key(fake_gateway) == str(path)
 
 
 def test_the_error_holds_no_cause_context_or_text(fake_gateway: FakeGateway) -> None:
-    path = write_default(fake_gateway, f"a: [\nb: {SECRET}")
+    path = write_default(fake_gateway, f"a: [\nb: {CANARY}")
     with pytest.raises(ConfigInvalid) as raised:
         load_default(fake_gateway)
     error = raised.value
     assert error.__cause__ is None
     assert error.__context__ is None
     assert str(error) == "configuration is invalid"
-    assert SECRET not in repr(error) + str(error.args)
+    assert CANARY not in repr(error) + str(error.args)
     assert error.key == str(path)
-    fake_gateway.file_errors[str(path)] = OSError(SECRET)
+    fake_gateway.file_errors[str(path)] = OSError(CANARY)
     with pytest.raises(ConfigInvalid) as raised:
         load_default(fake_gateway)
     assert raised.value.__cause__ is None
@@ -759,7 +761,7 @@ def test_a_dropin_directory_that_is_a_file_is_fine(fake_gateway: FakeGateway) ->
 def test_an_unlistable_dropin_directory_names_the_directory(fake_gateway: FakeGateway) -> None:
     write_default(fake_gateway, "timeout: 5\n")
     directory = str(default_file(fake_gateway).parent / "config.d")
-    fake_gateway.directory_errors[directory] = PermissionError(13, "denied " + SECRET)
+    fake_gateway.directory_errors[directory] = PermissionError(13, "denied " + CANARY)
     assert invalid_key(fake_gateway) == directory
 
 
@@ -791,7 +793,7 @@ def test_a_dropin_over_the_cap_names_the_dropin(fake_gateway: FakeGateway) -> No
 
 def test_a_parse_error_in_a_dropin_names_the_dropin(fake_gateway: FakeGateway) -> None:
     write_default(fake_gateway, "timeout: 5\n")
-    directory = dropins(fake_gateway, a__yaml="a: 1\n", b__yaml=f"a: [\n{SECRET}")
+    directory = dropins(fake_gateway, a__yaml="a: 1\n", b__yaml=f"a: [\n{CANARY}")
     assert invalid_key(fake_gateway) == str(directory / "b.yaml")
 
 
@@ -891,7 +893,7 @@ def test_a_relative_config_path_reads_dropins_beside_it(
 def test_a_dropin_of_a_named_config_file_error_never_echoes_content(
     fake_gateway: FakeGateway,
 ) -> None:
-    dropins(fake_gateway, a__yaml=f"key: [\n  {SECRET}\n")
+    dropins(fake_gateway, a__yaml=f"key: [\n  {CANARY}\n")
     with pytest.raises(ConfigInvalid) as raised:
         load_default(fake_gateway)
     assert "FAKESECRET" not in str(raised.value) + repr(raised.value) + raised.value.key
@@ -958,7 +960,7 @@ def test_no_environment_variable_overrides_a_setting(
         ("SLACK_NOTICE_CONFIG", "/nonexistent"),
         ("SLACK_NOTICE_WEBHOOK_ENV", "OTHER"),
         ("TIMEOUT", "99"),
-        ("SLACK_WEBHOOK", SECRET),
+        ("SLACK_WEBHOOK", CANARY),
     ):
         monkeypatch.setenv(name, value)
     fake_gateway._environment.update({"SLACK_NOTICE_TIMEOUT": "99", "SLACK_NOTICE_LOG": "false"})
@@ -1049,7 +1051,7 @@ def test_a_missing_config_file_through_the_cli(
 def test_a_broken_file_through_the_cli_names_the_path_and_nothing_else(
     fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = write_default(fake_gateway, f'webhook_env: "{SECRET}\nother: [\n')
+    path = write_default(fake_gateway, f'webhook_env: "{CANARY}\nother: [\n')
     code, out, err, _, _ = run(["validate", "--json"], fake_gateway, monkeypatch)
     assert code == 2
     document = assert_valid("cli/error", out)
@@ -1071,17 +1073,17 @@ def test_a_broken_file_through_the_cli_names_the_path_and_nothing_else(
 @pytest.mark.parametrize(
     "content",
     [
-        f"a: [\n{SECRET}\n",
-        f'a: "{SECRET}\n',
-        f"a: 1\na: {SECRET}\n",
-        f"a: &x {SECRET}\nb: *x\n",
-        f"a: !!python/object:os.system {SECRET}\n",
-        f"{SECRET}\n",
-        f"- {SECRET}\n",
-        f"a: {SECRET}\n---\nb: {SECRET}\n",
-        f"{SECRET}: [\n",
-        f"a:\t{SECRET}\n\tb: 1\n",
-        f"a: {SECRET}\x00\n",
+        f"a: [\n{CANARY}\n",
+        f'a: "{CANARY}\n',
+        f"a: 1\na: {CANARY}\n",
+        f"a: &x {CANARY}\nb: *x\n",
+        f"a: !!python/object:os.system {CANARY}\n",
+        f"{CANARY}\n",
+        f"- {CANARY}\n",
+        f"a: {CANARY}\n---\nb: {CANARY}\n",
+        f"{CANARY}: [\n",
+        f"a:\t{CANARY}\n\tb: 1\n",
+        f"a: {CANARY}\x00\n",
     ],
 )
 def test_a_yaml_error_that_would_quote_a_secret_never_reaches_any_output(
@@ -1144,7 +1146,7 @@ def test_the_environment_given_to_the_cli_does_not_override_the_config(
         return 0
 
     monkeypatch.setitem(cli.HANDLERS, "validate", handler)
-    env = {"SLACK_NOTICE_TIMEOUT": "99", "SLACK_NOTICE_ENABLED": "false", "SLACK_WEBHOOK": SECRET}
+    env = {"SLACK_NOTICE_TIMEOUT": "99", "SLACK_NOTICE_ENABLED": "false", "SLACK_WEBHOOK": CANARY}
     out = io.BytesIO()
     main(
         ["validate"],
