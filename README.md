@@ -108,7 +108,7 @@ credential: ok (the webhook credential is set and has the form of a workflow tri
 slack-notice validate --json
 ```
 
-Plain `validate` never prompts, makes no network call and sends nothing; `--test-message` is the exception. It checks that the config loads (`config`) and that the credential variable holds a value shaped like a trigger URL (`credential`). It cannot tell a live URL from a revoked one. A tool disabled in the config still reports configuration and credential faults, and `--json` includes `enabled` in its document.
+Plain `validate` never prompts, makes no network call and sends nothing; `--test-message` is the exception. It checks that the config loads (`config`) and that the credential variable holds a value shaped like a trigger URL (`credential`). It cannot tell a live URL from a revoked one. A tool disabled in the config still reports configuration and credential faults, and `--json` includes `enabled` and, in every document with `checks`, the effective `limits` (`max_chars`, `max_bytes`, `timeout_s`, `spacing_s`).
 
 Without `--json` it prints one line per check on stderr, `<name>: ok (<message>)` or `<name>: failed (<message>)`; `--quiet` keeps only the failed lines. Exit 0 means every check passed, exit 2 means the config is invalid, exit 12 means the credential check failed.
 

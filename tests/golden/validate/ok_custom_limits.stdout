@@ -1,0 +1,1 @@
+{"ok":true,"enabled":true,"checks":[{"name":"config","ok":true,"message":"configuration is valid"},{"name":"credential","ok":true,"message":"the webhook credential is set and has the form of a workflow trigger URL"}],"limits":{"max_chars":5000,"max_bytes":12000,"timeout_s":60.0,"spacing_s":1.0}}

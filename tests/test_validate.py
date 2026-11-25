@@ -37,8 +37,21 @@ def check(name: str, ok: bool, message: str) -> dict[str, Any]:
     return {"name": name, "ok": ok, "message": message}
 
 
-def document(*checks: dict[str, Any], ok: bool, enabled: bool = True) -> dict[str, Any]:
-    return {"ok": ok, "enabled": enabled, "checks": list(checks)}
+DEFAULT_LIMITS = {"max_chars": 3000, "max_bytes": 12000, "timeout_s": 10.0, "spacing_s": 1.0}
+
+
+def document(
+    *checks: dict[str, Any],
+    ok: bool,
+    enabled: bool = True,
+    limits: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": ok,
+        "enabled": enabled,
+        "checks": list(checks),
+        "limits": DEFAULT_LIMITS if limits is None else limits,
+    }
 
 
 GOOD = [check("config", True, CONFIG_OK), check("credential", True, CREDENTIAL_OK)]
@@ -63,7 +76,8 @@ def test_a_good_config_and_credential_is_ok_and_exits_0(fake_gateway: FakeGatewa
     assert sent.code == 0 and sent.err == b""
     assert sent.stdout.endswith("\n") and sent.stdout.count("\n") == 1
     assert assert_valid("cli/validate", sent.out) == document(*GOOD, ok=True)
-    assert list(sent.document) == ["ok", "enabled", "checks"]  # key order of the interface
+    # key order of the interface
+    assert list(sent.document) == ["ok", "enabled", "checks", "limits"]
     assert_untouched(sent, fake_gateway)
 
 
@@ -536,9 +550,76 @@ def test_the_webhook_url_is_in_no_stream_and_no_file(
 def test_the_validate_document_is_a_closed_shape(fake_gateway: FakeGateway) -> None:
     sent = go(VALIDATE, fake_gateway)
     parsed = json.loads(sent.out)
-    assert set(parsed) == {"ok", "enabled", "checks"}
+    assert set(parsed) == {"ok", "enabled", "checks", "limits"}
     assert all(set(c) == {"name", "ok", "message"} for c in parsed["checks"])
 
 
 def test_the_handler_is_registered_for_validate() -> None:
     assert cli.HANDLERS["validate"] is cli.validate
+
+
+# --- limits (#43) ---------------------------------------------------------------------------------
+
+
+def test_limits_report_the_defaults_with_their_exact_types(fake_gateway: FakeGateway) -> None:
+    sent = go(VALIDATE, fake_gateway)
+    limits = assert_valid("cli/validate", sent.out)["limits"]
+    assert limits == {"max_chars": 3000, "max_bytes": 12000, "timeout_s": 10.0, "spacing_s": 1.0}
+    assert list(limits) == ["max_chars", "max_bytes", "timeout_s", "spacing_s"]
+    assert type(limits["max_chars"]) is int and type(limits["max_bytes"]) is int
+    assert type(limits["timeout_s"]) is float and type(limits["spacing_s"]) is float
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ("max_chars: 12000\n", {"max_chars": 12000}),
+        ("max_chars: 2000\n", {"max_chars": 2000}),
+        ("timeout: 1m\n", {"timeout_s": 60.0}),
+        ("timeout: 3500ms\n", {"timeout_s": 3.5}),
+        ("timeout: 120\n", {"timeout_s": 120.0}),
+        ("max_chars: 5000\ntimeout: 30s\n", {"max_chars": 5000, "timeout_s": 30.0}),
+    ],
+)
+def test_limits_follow_the_loaded_config(
+    fake_gateway: FakeGateway, tmp_path: Path, config: str, expected: dict[str, Any]
+) -> None:
+    sent = go(VALIDATE, fake_gateway, config=write_config(tmp_path, config))
+    assert sent.code == 0
+    assert assert_valid("cli/validate", sent.out)["limits"] == {**DEFAULT_LIMITS, **expected}
+
+
+def test_limits_follow_a_drop_in_over_the_config(fake_gateway: FakeGateway, tmp_path: Path) -> None:
+    config = write_config(tmp_path, "max_chars: 4000\n")
+    drop_in = Path(config).parent / "config.d"
+    drop_in.mkdir()
+    (drop_in / "10.yaml").write_text("max_chars: 6000\n", encoding="utf-8")
+    sent = go(VALIDATE, fake_gateway, config=config)
+    assert assert_valid("cli/validate", sent.out)["limits"]["max_chars"] == 6000
+
+
+def test_limits_are_present_when_the_credential_check_fails_and_when_disabled(
+    fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    sent = go(VALIDATE, fake_gateway, env={})
+    assert sent.code == 12
+    assert assert_valid("cli/validate", sent.out)["limits"] == DEFAULT_LIMITS
+    config = write_config(tmp_path, "enabled: false\ntimeout: 20s\n")
+    off = go(VALIDATE, fake_gateway, config=config)
+    assert assert_valid("cli/validate", off.out)["limits"] == {**DEFAULT_LIMITS, "timeout_s": 20.0}
+
+
+def test_an_invalid_config_prints_the_envelope_without_limits(
+    fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    sent = go(VALIDATE, fake_gateway, config=write_config(tmp_path, "max_chars: 5\n"))
+    assert sent.code == 2
+    assert "limits" not in assert_valid("cli/error", sent.out)
+    assert b"limits" not in sent.out
+
+
+def test_plain_validate_prints_no_limits_line(fake_gateway: FakeGateway) -> None:
+    sent = go(["validate"], fake_gateway)
+    assert sent.code == 0 and sent.out == b""
+    assert b"limits" not in sent.err and b"3000" not in sent.err
+    assert sent.err.count(b"\n") == 2

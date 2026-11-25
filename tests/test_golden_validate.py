@@ -42,6 +42,7 @@ UNSET: dict[str, str] = {}
 WRONG = {"SLACK_WEBHOOK": "https://example.invalid/not-a-trigger"}
 SCENARIOS = [
     Scenario("ok", 0),
+    Scenario("ok_custom_limits", 0, config="max_chars: 5000\ntimeout: 1m\n"),
     Scenario("ok_human", 0, ["validate"]),
     Scenario("ok_disabled", 0, config="enabled: false\n"),
     Scenario("ok_disabled_human", 0, ["validate"], config="enabled: false\n"),

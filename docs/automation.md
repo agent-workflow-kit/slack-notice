@@ -194,14 +194,14 @@ The spacing and the log depend on a usable state directory. If it cannot be used
 
 ## 6. Health check and doctor recipe
 
-`slack-notice validate [--json] [--config <path>]` never prompts, makes no network call, uses no state directory, writes no log record and reads no stdin. It checks the config and that the credential variable is set and has the form of a workflow trigger URL. Exit 0 means ok, 2 means the config is invalid (an error envelope on stdout with `--json`, one stderr line otherwise), and 12 means the credential check failed: the variable is unset, empty or has the wrong shape. A failed credential check is a `validate` document with `ok` false, and with `--json` nothing is written to stderr. The document is `{ok, enabled, checks: [{name, ok, message}]}`; a doctor reads `enabled`, because a tool that is switched off still reports its config and credential faults, and a failed credential check of a tool with `enabled` false is information, not an alarm. Without `--json`, `validate` prints one line per check on stderr, `<name>: ok (<message>)` or `<name>: failed (<message>)`, and `--quiet` keeps only the failed ones, which is what the second cron line of [section 2](#2-the-cron-line) relies on.
+`slack-notice validate [--json] [--config <path>]` never prompts, makes no network call, uses no state directory, writes no log record and reads no stdin. It checks the config and that the credential variable is set and has the form of a workflow trigger URL. Exit 0 means ok, 2 means the config is invalid (an error envelope on stdout with `--json`, one stderr line otherwise), and 12 means the credential check failed: the variable is unset, empty or has the wrong shape. A failed credential check is a `validate` document with `ok` false, and with `--json` nothing is written to stderr. The document is `{ok, enabled, checks: [{name, ok, message}], limits: {max_chars, max_bytes, timeout_s, spacing_s}}`, where `limits` is the effective limits of the loaded config (absent when the config is invalid and from the `{outcome: disabled}` document); a doctor reads `enabled`, because a tool that is switched off still reports its config and credential faults, and a failed credential check of a tool with `enabled` false is information, not an alarm. Without `--json`, `validate` prints one line per check on stderr, `<name>: ok (<message>)` or `<name>: failed (<message>)`, and `--quiet` keeps only the failed ones, which is what the second cron line of [section 2](#2-the-cron-line) relies on.
 
 A healthy tool, as the doctor sees it with `validate --json`:
 
 <!-- golden validate/ok.stdout -->
 
 ```json
-{"ok":true,"enabled":true,"checks":[{"name":"config","ok":true,"message":"configuration is valid"},{"name":"credential","ok":true,"message":"the webhook credential is set and has the form of a workflow trigger URL"}]}
+{"ok":true,"enabled":true,"checks":[{"name":"config","ok":true,"message":"configuration is valid"},{"name":"credential","ok":true,"message":"the webhook credential is set and has the form of a workflow trigger URL"}],"limits":{"max_chars":3000,"max_bytes":12000,"timeout_s":10.0,"spacing_s":1.0}}
 ```
 
 The credential unset (for example because the env file was not sourced), exit 12:
@@ -209,7 +209,7 @@ The credential unset (for example because the env file was not sourced), exit 12
 <!-- golden validate/credential_unset.stdout -->
 
 ```json
-{"ok":false,"enabled":true,"checks":[{"name":"config","ok":true,"message":"configuration is valid"},{"name":"credential","ok":false,"message":"the webhook credential is unset or not a workflow trigger URL"}]}
+{"ok":false,"enabled":true,"checks":[{"name":"config","ok":true,"message":"configuration is valid"},{"name":"credential","ok":false,"message":"the webhook credential is unset or not a workflow trigger URL"}],"limits":{"max_chars":3000,"max_bytes":12000,"timeout_s":10.0,"spacing_s":1.0}}
 ```
 
 Read the document with a JSON parser, as in the snippet of [section 3](#3-the-canonical-call-and-what-to-do-with-each-exit-code): the tool is healthy when the exit code is 0 and `ok` is true; `enabled` false means that it is switched off on purpose.

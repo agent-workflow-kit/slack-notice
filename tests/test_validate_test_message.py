@@ -53,12 +53,20 @@ def check(name: str, ok: bool, message: str) -> dict[str, Any]:
 
 
 PASSED = [check("config", True, CONFIG_OK), check("credential", True, CREDENTIAL_OK)]
-GOOD = {"ok": True, "enabled": True, "checks": [*PASSED, check("test_message", True, TEST_OK)]}
+LIMITS = {"max_chars": 3000, "max_bytes": 12000, "timeout_s": 10.0, "spacing_s": 1.0}
+GOOD = {
+    "ok": True,
+    "enabled": True,
+    "checks": [*PASSED, check("test_message", True, TEST_OK)],
+    "limits": LIMITS,
+}
 FAILED = {
     "ok": False,
     "enabled": True,
     "checks": [*PASSED, check("test_message", False, TEST_FAILED)],
+    "limits": LIMITS,
 }
+FAILED_TIMEOUT_3 = {**FAILED, "limits": {**LIMITS, "timeout_s": 3.0}}
 
 
 def run(argv: list[str], gateway: FakeGateway, **kwargs: Any) -> Sent:
@@ -76,7 +84,8 @@ def test_a_test_message_posts_the_fixed_rendered_body_and_prints_the_document(
     sent = run(VT, fake_gateway)
     assert (sent.code, sent.exited, sent.err) == (0, True, b"")
     assert assert_valid("cli/validate", sent.out) == GOOD
-    assert sent.stdout.count("\n") == 1 and list(sent.document) == ["ok", "enabled", "checks"]
+    assert sent.stdout.count("\n") == 1
+    assert list(sent.document) == ["ok", "enabled", "checks", "limits"]
     (connection,) = fake_gateway.connections
     ((path, body),) = connection.requests
     assert path == SECRET.path
@@ -241,7 +250,7 @@ def test_a_lock_wait_past_the_deadline_is_a_failed_check_and_a_failed_record(
     free_the_lock_before_the_log(fake_gateway, monkeypatch)
     fake_gateway.lock_held = True
     sent = run(VT, fake_gateway, config=write_config(tmp_path, "timeout: 3\n"))
-    assert (sent.code, sent.document) == (12, FAILED)
+    assert (sent.code, sent.document) == (12, FAILED_TIMEOUT_3)
     assert fake_gateway.connections == []
     (record,) = sent.records
     assert (record["outcome"], record["code"], record["http_status"]) == (
@@ -256,7 +265,7 @@ def test_the_deadline_starts_at_the_check_and_bounds_the_whole_run(
 ) -> None:
     fake_gateway.script(reply(429), reply(429))  # the 4 s wait after the second does not fit
     sent = run(VT, fake_gateway, config=write_config(tmp_path, "timeout: 3\n"))
-    assert sent.code == 12 and sent.document == FAILED
+    assert sent.code == 12 and sent.document == FAILED_TIMEOUT_3
     (record,) = sent.records
     assert record["code"] == "rate_limited" and record["duration_ms"] <= 3000
 
@@ -274,6 +283,7 @@ def test_a_failed_credential_ends_the_run_with_no_test_message(
         "ok": False,
         "enabled": True,
         "checks": [check("config", True, CONFIG_OK), check("credential", False, CREDENTIAL_BAD)],
+        "limits": LIMITS,
     }
     assert_valid("cli/validate", sent.out)
     assert fake_gateway.connections == [] and sent.records == [] and sent.state_files == {}

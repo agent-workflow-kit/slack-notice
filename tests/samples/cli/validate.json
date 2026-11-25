@@ -19,7 +19,13 @@
           "ok": true,
           "message": "fine"
         }
-      ]
+      ],
+      "limits": {
+        "max_chars": 3000,
+        "max_bytes": 12000,
+        "timeout_s": 10.0,
+        "spacing_s": 1.0
+      }
     },
     "config_only": {
       "ok": true,
@@ -30,7 +36,13 @@
           "ok": true,
           "message": "fine"
         }
-      ]
+      ],
+      "limits": {
+        "max_chars": 3000,
+        "max_bytes": 12000,
+        "timeout_s": 10.0,
+        "spacing_s": 1.0
+      }
     },
     "credential_failed": {
       "ok": false,
@@ -46,7 +58,13 @@
           "ok": false,
           "message": "variable is not set"
         }
-      ]
+      ],
+      "limits": {
+        "max_chars": 3000,
+        "max_bytes": 12000,
+        "timeout_s": 10.0,
+        "spacing_s": 1.0
+      }
     },
     "disabled": {
       "outcome": "disabled"
@@ -70,7 +88,40 @@
           "ok": false,
           "message": "exit 12"
         }
-      ]
+      ],
+      "limits": {
+        "max_chars": 3000,
+        "max_bytes": 12000,
+        "timeout_s": 10.0,
+        "spacing_s": 1.0
+      }
+    },
+    "limits_non_default": {
+      "ok": true,
+      "enabled": true,
+      "checks": [
+        {
+          "name": "config",
+          "ok": true,
+          "message": "fine"
+        },
+        {
+          "name": "credential",
+          "ok": true,
+          "message": "fine"
+        },
+        {
+          "name": "test_message",
+          "ok": true,
+          "message": "fine"
+        }
+      ],
+      "limits": {
+        "max_chars": 12000,
+        "max_bytes": 12000,
+        "timeout_s": 3.5,
+        "spacing_s": 1
+      }
     }
   },
   "invalid": {
@@ -93,7 +144,13 @@
             "ok": false,
             "message": "fine"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -116,7 +173,13 @@
             "ok": true,
             "message": "fine"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -137,7 +200,13 @@
             "ok": true,
             "message": "fine"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -159,7 +228,13 @@
             "name": "config",
             "ok": true
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -182,7 +257,13 @@
             "message": "fine",
             "url": "x"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -203,7 +284,13 @@
             "ok": true,
             "message": "fine"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -223,7 +310,13 @@
             "message": "fine"
           }
         ],
-        "x": 1
+        "x": 1,
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -261,7 +354,13 @@
       "instance": {
         "ok": true,
         "enabled": true,
-        "checks": []
+        "checks": [],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [
         "checks"
@@ -289,7 +388,13 @@
             "ok": true,
             "message": "fine"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -317,7 +422,13 @@
             "ok": true,
             "message": "fine"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -345,7 +456,13 @@
             "ok": true,
             "message": "fine"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -368,7 +485,13 @@
             "ok": true,
             "message": "fine"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -406,7 +529,13 @@
             "ok": true,
             "message": "fine"
           }
-        ]
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
       },
       "path": [],
       "keyword": "oneOf",
@@ -415,6 +544,186 @@
           "checks"
         ],
         "keyword": "items"
+      }
+    },
+    "limits_missing": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "credential",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "test_message",
+            "ok": true,
+            "message": "fine"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf",
+      "inner": {
+        "path": [],
+        "keyword": "required"
+      }
+    },
+    "limits_sub_key_missing": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "credential",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "test_message",
+            "ok": true,
+            "message": "fine"
+          }
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "spacing_s": 1.0
+        }
+      },
+      "path": [
+        "limits"
+      ],
+      "keyword": "required"
+    },
+    "limits_wrong_type": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "credential",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "test_message",
+            "ok": true,
+            "message": "fine"
+          }
+        ],
+        "limits": {
+          "max_chars": "3000",
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
+      },
+      "path": [
+        "limits",
+        "max_chars"
+      ],
+      "keyword": "type"
+    },
+    "limits_extra_key": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "credential",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "test_message",
+            "ok": true,
+            "message": "fine"
+          }
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0,
+          "extra": 1
+        }
+      },
+      "path": [
+        "limits"
+      ],
+      "keyword": "additionalProperties"
+    },
+    "limits_timeout_out_of_range": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "credential",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "test_message",
+            "ok": true,
+            "message": "fine"
+          }
+        ],
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 121,
+          "spacing_s": 1.0
+        }
+      },
+      "path": [
+        "limits",
+        "timeout_s"
+      ],
+      "keyword": "maximum"
+    },
+    "disabled_with_limits": {
+      "instance": {
+        "outcome": "disabled",
+        "limits": {
+          "max_chars": 3000,
+          "max_bytes": 12000,
+          "timeout_s": 10.0,
+          "spacing_s": 1.0
+        }
+      },
+      "path": [],
+      "keyword": "oneOf",
+      "inner": {
+        "path": [],
+        "keyword": "additionalProperties"
       }
     }
   }
