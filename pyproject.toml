@@ -1,6 +1,6 @@
 [project]
 name = "slack-notice"
-version = "0.14.0"
+version = "0.15.0"
 description = "Send a notification to Slack via an incoming webhook"
 readme = "README.md"
 requires-python = ">=3.12"
