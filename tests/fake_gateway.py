@@ -20,9 +20,9 @@ What it models, and how it stays faithful to ``slack_notice.gateway``:
 - The response exposes only ``status`` and ``read``; a body shorter than its declared length
   raises ``IncompleteRead`` exactly where the real wrapper does (checked against the real
   ``http.client`` in the contract tests).
-- State files, locks, ``read_regular_file`` and ``read_source`` are the real implementations
-  (inherited) running on the files a test creates under its private home, so hostile paths
-  (symlink, FIFO, wrong owner) behave as in production. Hooks can inject failures instead.
+- State files, locks, ``read_regular_file``, ``list_directory`` and ``read_source`` are the real
+  implementations (inherited) running on the files a test creates under its private home, so
+  hostile paths (symlink, FIFO, wrong owner) behave as in production. Hooks can inject failures.
 - ``home_dir``, ``uid`` and ``login_name`` are supplied here; ``pwd`` is never consulted.
   ``is_directory`` is the real check unless ``home_is_directory`` scripts its answer.
 - Name resolution inside ``connect()`` is driven by ``Attempt.resolve_stall``,
@@ -509,6 +509,9 @@ class FakeGateway(SystemGateway):
         self.state_file_errors: dict[str, BaseException] = {}
         self.lock_held = False
         self.lock_error: BaseException | None = None
+        # config files: an error raised for a path (as given to the gateway) instead of reading
+        self.file_errors: dict[str, BaseException] = {}
+        self.directory_errors: dict[str, BaseException] = {}
 
     # -- scripting --
 
@@ -680,7 +683,20 @@ class FakeGateway(SystemGateway):
     def read_regular_file(self, path: str | os.PathLike[str], max_bytes: int) -> bytes:
         self._record("read_regular_file")
         self._advance(self.state_delay)
+        error = self.file_errors.get(os.fspath(path))
+        if error is not None:
+            raise error
         return super().read_regular_file(path, max_bytes)
+
+    def absolute_path(self, path: str) -> str:
+        return super().absolute_path(path)
+
+    def list_directory(self, path: str) -> list[str]:
+        self._record("list_directory")
+        error = self.directory_errors.get(path)
+        if error is not None:
+            raise error
+        return super().list_directory(path)
 
     # -- trust and network --
 

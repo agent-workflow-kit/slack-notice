@@ -872,6 +872,48 @@ def test_read_regular_file_limits(gateway: Gateway, tmp_path: Path) -> None:
     assert gateway.read_regular_file(link, 10) == b"ok"
 
 
+def test_list_directory_returns_names_and_follows_a_link(gateway: Gateway, tmp_path: Path) -> None:
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "b.yaml").write_text("x")
+    (tmp_path / "d" / "a.yaml").write_text("x")
+    (tmp_path / "link").symlink_to(tmp_path / "d")
+    assert sorted(gateway.list_directory(str(tmp_path / "d"))) == ["a.yaml", "b.yaml"]
+    assert sorted(gateway.list_directory(str(tmp_path / "link"))) == ["a.yaml", "b.yaml"]
+
+
+def test_list_directory_failures_are_oserrors(gateway: Gateway, tmp_path: Path) -> None:
+    (tmp_path / "f").write_text("x")
+    with pytest.raises(FileNotFoundError):
+        gateway.list_directory(str(tmp_path / "missing"))
+    with pytest.raises(NotADirectoryError):
+        gateway.list_directory(str(tmp_path / "f"))
+    with pytest.raises(ValueError):
+        gateway.list_directory("a\0b")
+
+
+def test_absolute_path_keeps_an_absolute_path_as_it_is(gateway: Gateway) -> None:
+    assert gateway.absolute_path("/a/../b//c") == "/a/../b//c"
+
+
+def test_absolute_path_joins_a_relative_path_to_the_working_directory(
+    gateway: Gateway, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert gateway.absolute_path("home") == f"{tmp_path}/home"
+    assert gateway.absolute_path("--config") == f"{tmp_path}/--config"
+    assert gateway.absolute_path("") == f"{tmp_path}/"
+
+
+def test_absolute_path_without_a_working_directory_is_prefixed(
+    gateway: Gateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken() -> str:
+        raise FileNotFoundError
+
+    monkeypatch.setattr(os, "getcwd", broken)
+    assert gateway.absolute_path("home") == "./home"
+
+
 # --- TLS ------------------------------------------------------------------------------------
 
 

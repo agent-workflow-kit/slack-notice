@@ -5,7 +5,9 @@ description = "Send a notification to Slack via an incoming webhook"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0.2",
+]
 
 [project.scripts]
 slack-notice = "slack_notice.cli:main"

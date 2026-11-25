@@ -35,7 +35,13 @@ from dataclasses import dataclass, field
 from typing import Any, NoReturn, Protocol
 
 from slack_notice import __version__
-from slack_notice.config import HomeUnusable, resolve_home
+from slack_notice.config import (
+    ConfigInvalid,
+    HomeUnusable,
+    load_config,
+    resolve_home,
+    resolve_settings,
+)
 from slack_notice.gateway import Gateway, SystemGateway
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
@@ -385,13 +391,31 @@ def parse(argv: Sequence[str]) -> argparse.Namespace:
         raise usage_error("--verbose and --quiet cannot be combined")
     if args.actor is not None and ACTOR_PATTERN.fullmatch(args.actor) is None:
         raise usage_error("--actor must be human:<name> or auto:<name>")
-    # TODO(#10): an empty --config path is a missing file: config_invalid with details.key
-    # --config (exit 2), decided by config loading and not here.
+    # An empty --config path is a missing file (config_invalid, details.key --config): config
+    # loading decides it (load_settings), not the parser.
     # TODO(#16): flag combinations of send and the checks of the flag values.
     return args
 
 
 # --- dispatch ------------------------------------------------------------------------------------
+
+
+def load_settings(ctx: Context) -> dict[str, Any]:
+    """The effective settings: flags, then the config file and drop-ins, then the defaults.
+
+    A file that cannot be used is exit 2 config_invalid with the file path (or `--config` for a
+    missing --config file) in details.key and a fixed message. The values are not validated yet.
+    """
+    # TODO(#11): validate the values and map DurationError and unknown keys to config_invalid.
+    key: str | None = None
+    values: dict[str, Any] = {}
+    try:
+        values = load_config(ctx.gateway, home=ctx.home, config_path=ctx.config)
+    except ConfigInvalid as error:
+        key = error.key
+    if key is not None:  # raised here, not in the handler: no context is kept
+        raise CliError(2, "config_invalid", "configuration is invalid", details={"key": key})
+    return resolve_settings(values, {})
 
 
 def _not_implemented(_ctx: Context) -> int:
