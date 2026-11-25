@@ -460,7 +460,7 @@ class SystemGateway:
         Python signal handlers run between slices, in the main thread. A handler that only sets
         a flag does not stop this call: the handler must raise or exit.
         """
-        # todo(#27): signal handler before step 5 must exit/raise; read_source has no stop callback
+        # todo(#27): from step 5 on a signal is the deadline (cli._exit_on_signal: input only)
         if isinstance(fd_or_path, int):
             return self._read_fd(fd_or_path, max_bytes, remaining, lenient=True)
         fd = _open_regular_for_reading(fd_or_path)

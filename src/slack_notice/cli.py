@@ -29,8 +29,11 @@ import functools
 import json
 import os
 import re
+import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, Protocol
 
@@ -59,6 +62,7 @@ from slack_notice.payload import (
     sanitize_notification,
     validate_notification,
 )
+from slack_notice.render import render
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
 ERROR_EXIT_CODES = frozenset({1, 2, 12, 20})
@@ -481,6 +485,43 @@ def check_stdin_source(args: argparse.Namespace, streams: Streams) -> None:
         raise usage_error("stdin is a terminal: give --message, --stdin-json or --file")
 
 
+# --- signals ------------------------------------------------------------------------------------
+
+SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+class _Signalled(BaseException):  # noqa: N818  (not an Exception: no handler may swallow it)
+    """A signal ended the run: exit 128+N with no envelope and no output."""
+
+    def __init__(self, number: int) -> None:
+        super().__init__(number)
+        self.number = number
+
+
+@contextmanager
+def _exit_on_signal() -> Iterator[None]:
+    """SIGTERM, SIGINT and SIGHUP raise ``_Signalled`` once; the old handlers come back after.
+
+    Handlers can only be installed from the main thread; elsewhere nothing is installed.
+    TODO(#27): from step 5 on a signal is the deadline passing, not an exit (the gate decides).
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(number: int, _frame: object) -> None:
+        for other in SIGNALS:  # handled once: a second signal while unwinding is ignored
+            signal.signal(other, signal.SIG_IGN)
+        raise _Signalled(number)
+
+    saved = {number: signal.signal(number, handler) for number in SIGNALS}
+    try:
+        yield
+    finally:
+        for number, previous in saved.items():
+            signal.signal(number, previous)
+
+
 # --- dispatch ------------------------------------------------------------------------------------
 
 
@@ -494,7 +535,7 @@ def load_settings(ctx: Context) -> dict[str, Any]:
     same error with the config key name (or `?`) in details.key and a message that names the key
     and the rule (never the value).
     """
-    # TODO(#28), TODO(#31), TODO(#32): the send and validate handlers call this; they wire it in.
+    # The send dry run calls this; TODO(#28), TODO(#31), TODO(#32): the real send and validate.
     key: str | None = None
     message = ""
     settings: dict[str, Any] = {}
@@ -527,9 +568,9 @@ def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
     ``remaining`` is the seconds left of the deadline, which starts at step 3. The caller
     never sees input text in an error.
 
-    TODO(#28): the send handler calls this, starts the deadline and logs ``failed`` for the
+    The dry run calls this and starts the deadline. TODO(#28): the real send logs ``failed`` for the
     timeout error (a log record for exit 12 ``unavailable``, phase ``input``).
-    TODO(#27): a signal during this call must exit 128+N; the handler has to raise or exit.
+    A signal during this call raises ``_Signalled`` from the handler of ``_exit_on_signal``.
     """
     file_arg: str | None = ctx.args.file
     source: int | str = 0 if file_arg is None or file_arg == "-" else file_arg
@@ -573,7 +614,7 @@ def load_notification(ctx: Context, remaining: float) -> dict[str, Any]:
     The error holds a fixed message and the pointer, never an input value.
 
     ``sanitize_loaded`` (the sanitizer, ``empty_message`` and the link rule) comes after this.
-    TODO(#28): the send handler calls this after starting the deadline.
+    The send handler calls this after starting the deadline.
     """
     args = ctx.args
     refused: FieldRefused | None = None
@@ -623,9 +664,67 @@ def _not_implemented(_ctx: Context) -> int:
     raise NotImplementedError
 
 
-# TODO(#28): the send command. TODO(#31), TODO(#32): validate.
+def _elapsed_ms(ctx: Context, since: float) -> int:
+    return max(0, int((ctx.gateway.monotonic() - since) * 1000))
+
+
+def _disabled(ctx: Context) -> int:
+    """Step 2, `enabled: false`: not an error, nothing sent, exit 22."""
+    if ctx.json:
+        ctx.output.json_document({"outcome": "disabled"})
+    else:
+        ctx.output.info("disabled in config")
+    ctx.output.result_printed()
+    return 22
+
+
+def send(ctx: Context) -> int:
+    """The `send` command (interface: Send, steps 1 to 7).
+
+    Step 1 ran in ``parse`` and ``check_stdin_source``, and the home lookup of step 2 in ``_run``.
+    Only the dry run is implemented: it ends at step 4 and uses no credential, no state
+    directory, no lock and no log (``ctx.env`` and ``ctx.state_dir()`` are not touched).
+    """
+    if not ctx.dry_run:
+        # TODO(#28): steps 1 to 7 of a real send; the shared steps 2 to 4 move out of
+        # ``_dry_run`` into this function, and steps 5 to 7 follow them.
+        return _not_implemented(ctx)
+    return _dry_run(ctx)
+
+
+def _dry_run(ctx: Context) -> int:
+    settings = load_settings(ctx)  # step 2: config over defaults (exit 2 config_invalid)
+    if not settings["enabled"]:
+        return _disabled(ctx)
+    started = ctx.gateway.monotonic()  # step 3: the deadline starts here
+    notification = sanitize_loaded(load_notification(ctx, settings["timeout"]))
+    ctx.output.phase("input", _elapsed_ms(ctx, started))
+    phase_start = ctx.gateway.monotonic()
+    rendered = render(notification, settings)  # step 4
+    ctx.output.phase("render", _elapsed_ms(ctx, phase_start))
+    if ctx.json:
+        ctx.output.json_document(
+            {
+                "outcome": "dry_run",
+                "tool": "slack-notice",
+                "level": notification.level,
+                "truncated": rendered.truncated,
+                "bytes": rendered.bytes,
+                "duration_ms": _elapsed_ms(ctx, started),
+                "http_status": None,
+                "dedupe_key": ctx.args.dedupe_key,
+                "rendered": rendered.text,
+            }
+        )
+    else:
+        ctx.output.info(rendered.text)
+    ctx.output.result_printed()
+    return 0
+
+
+# TODO(#31), TODO(#32): validate.
 HANDLERS: dict[str, Callable[[Context], int]] = {
-    "send": _not_implemented,
+    "send": send,
     "validate": _not_implemented,
 }
 
@@ -717,9 +816,12 @@ def main(
     outcome: _EarlyExit | CliError | None = None
     code = 0
     # Only Exception is caught: SystemExit and KeyboardInterrupt (a signal) pass straight
-    # through. TODO(#27): signal handlers that exit 128+N before step 5.
+    # through (a signal is turned into ``_Signalled`` by ``_exit_on_signal``).
     try:
-        code = _run(argv, env, gateway, streams, holder)
+        with _exit_on_signal():
+            code = _run(argv, env, gateway, streams, holder)
+    except _Signalled as signalled:
+        return 128 + signalled.number  # no envelope, no output, no log record
     except _EarlyExit as early:
         outcome = early
     except CliError as error:
