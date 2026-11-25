@@ -1,0 +1,2 @@
+slack-notice: the state directory or a state file cannot be used safely; the log record or send spacing may be skipped
+sent (warn, 875 ms)
