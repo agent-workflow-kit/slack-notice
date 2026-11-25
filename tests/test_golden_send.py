@@ -31,7 +31,7 @@ from typing import Any
 import pytest
 
 from slack_notice import cli
-from slack_notice.gateway import SourceRead
+from slack_notice.gateway import SourceRead, StateUnusable
 from tests.fake_gateway import Attempt, FakeGateway, Reply, cert_verify_error
 from tests.harness import assert_valid, load_schema
 from tests.secret_scan import Corpus, Secret
@@ -91,6 +91,20 @@ def failing(**kwargs: Any) -> Attempt:
 OK = at()
 RATE = at(429, b"{}")
 SLOW_RATE = at(429, b"{}", wait=1.125)  # 1.5 s in all: the 2 s wait no longer fits in 3 s
+
+
+def odd_status(status: int) -> Attempt:
+    """An answer whose status the fake's ``Reply`` refuses to build (``http.client`` returns a final
+    1xx other than 100, and statuses up to 999, so they are real answers). The status is forced past
+    the ``Reply`` check; a 1xx has an empty body, as in ``http.client``."""
+    reply = Reply(status=200, body=b"", first_byte_delay=0.5)
+    object.__setattr__(reply, "status", status)
+    return Attempt(connect_delay=0.125, tls_delay=0.25, reply=reply)
+
+
+def unusable_state_dir(gateway: FakeGateway, _monkeypatch: pytest.MonkeyPatch) -> None:
+    gateway.state_dir_error = StateUnusable("x")
+
 
 LONG_MESSAGE = "word " * 1000  # over the 3000 character budget
 
@@ -178,6 +192,20 @@ SCENARIOS = [
     ),
     Scenario("sent_after_429", 0, SEND, HELLO, [RATE, OK]),
     Scenario("sent_message_cut", 0, SEND, stdin_json(message=LONG_MESSAGE, level="error"), [OK]),
+    Scenario("sent_quiet_json", 0, [*SEND, "--quiet"], HELLO, [OK]),
+    Scenario("sent_verbose", 0, ["send", "--verbose", "--stdin-json"], HELLO, [OK]),
+    Scenario("sent_verbose_json", 0, [*SEND, "--verbose"], HELLO, [OK]),
+    Scenario(
+        "sent_state_warning", 0, ["send", "--stdin-json"], HELLO, [OK], setup=unusable_state_dir
+    ),
+    Scenario(
+        "sent_state_warning_quiet_json",
+        0,
+        [*SEND, "--quiet"],
+        HELLO,
+        [OK],
+        setup=unusable_state_dir,
+    ),
     Scenario("sent_human", 0, ["send", "--stdin-json"], HELLO, [OK]),
     Scenario(
         "sent_flags_only", 0, ["send", "--json", "--title", "T", "--message", "M"], None, [OK]
@@ -223,6 +251,13 @@ SCENARIOS = [
     Scenario("auth_required_403", 12, SEND, HELLO, [at(403, b"{}")]),
     Scenario("auth_required_404", 12, SEND, HELLO, [at(404, b"{}")]),
     Scenario("wrong_host_response_302", 12, SEND, HELLO, [at(302, b"")]),
+    Scenario(
+        "host_rejected_quiet",
+        12,
+        ["send", "--quiet", "--stdin-json"],
+        HELLO,
+        [at(400, b'{"error":"invalid_blocks"}')],
+    ),
     # --- exit 12: not sent, worth retrying ---
     Scenario("rate_limited", 12, SEND, HELLO, [RATE, RATE, RATE]),
     Scenario(
@@ -269,6 +304,8 @@ SCENARIOS = [
     Scenario("upstream_error", 12, SEND, HELLO, [at(500, b"{}")]),
     Scenario("wrong_host_response_200_body", 12, SEND, HELLO, [at(200, b'{"ok":false}')]),
     Scenario("wrong_host_response_204", 12, SEND, HELLO, [at(204, b"")]),
+    Scenario("wrong_host_response_101", 12, SEND, HELLO, [odd_status(101)]),
+    Scenario("wrong_host_response_600", 12, SEND, HELLO, [odd_status(600)]),
     Scenario(
         "wrong_host_response_not_http",
         12,
