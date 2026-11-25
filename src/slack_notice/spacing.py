@@ -18,9 +18,9 @@ the send command reports as exit 12 ``unavailable`` with ``details.phase`` ``loc
 other ``BaseException`` (a signal handler's, ``KeyboardInterrupt``) propagates after the lock
 and the descriptor were released. No text from the file or the filesystem is kept.
 
-TODO(#25): the deadline is passed in as an absolute ``gateway.monotonic()`` value; the gate
-and the signal handling (a signal during the lock wait is handled as the deadline) are #25 and
-#27.
+TODO(#28): the deadline is passed in as an absolute ``gateway.monotonic()`` value; wiring the
+gate into the send flow is #28.
+TODO(#27): signal handling (a signal during the lock wait is handled as the deadline).
 TODO(#28): the send command maps ``SendLockTimeout`` to the exit 12 envelope and a ``failed``
 log record, calls ``stamp`` just before the POST and ``release`` after step 6.
 """

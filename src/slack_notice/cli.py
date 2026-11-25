@@ -293,8 +293,8 @@ class Context:
     home: str | None  # None only for `send --dry-run --config`, which needs no home
     actor: str
     actor_source: str
-    # TODO(#25): the deadline gate sets this when it moves to writing; exit 1 then reports
-    # unknown_outcome true.
+    # TODO(#28): set from ``Verdict.gate_writing`` (``slack_notice.deadline``); exit 1 then
+    # reports unknown_outcome true.
     gate_writing: bool = field(default=False)
     _state: StateDir | None = field(default=None, repr=False)
 
@@ -525,6 +525,9 @@ class _SignalGate:
 
     def __init__(self) -> None:
         self.committed = False
+        # TODO(#28): from step 5 the send sets this to ``Deadline.note_signal``: a signal then
+        # means the deadline has passed (the main thread notices within 100 ms), not an exit.
+        self.on_signal: Callable[[], None] | None = None
 
 
 @contextmanager
@@ -535,8 +538,9 @@ def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
     ignored: the result is printed whole and the exit code is the result's. The handlers stay
     installed until the result is printed and flushed.
     Handlers can only be installed from the main thread; elsewhere nothing is installed.
-    TODO(#25), TODO(#27): from step 5 on a signal is the deadline passing, not an exit (the gate
-    decides), and the commit point narrows to the start of the printing of the result.
+    From step 5 on ``gate.on_signal`` is set (#28) and a signal is the deadline passing, not an
+    exit (``Deadline.note_signal``); the commit point is the start of the printing of the result.
+    TODO(#27): the exit-code side of signals.
     """
     if threading.current_thread() is not threading.main_thread():
         yield
@@ -544,6 +548,10 @@ def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
 
     def handler(number: int, _frame: object) -> None:
         if gate.committed:
+            return
+        hook = gate.on_signal
+        if hook is not None:
+            hook()  # lock-free (``Deadline.note_signal``); later signals repeat it harmlessly
             return
         for other in SIGNALS:  # handled once: a second signal while unwinding is ignored
             signal.signal(other, signal.SIG_IGN)

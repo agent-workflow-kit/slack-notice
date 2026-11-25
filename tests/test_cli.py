@@ -705,7 +705,7 @@ def test_exit_one_with_json_prints_the_internal_envelope(
 def test_exit_one_after_the_gate_moved_to_writing_says_unknown_outcome(
     monkeypatch: pytest.MonkeyPatch, fake_gateway: FakeGateway
 ) -> None:
-    # TODO(#25): the deadline gate owns this flag; the skeleton only carries it.
+    # TODO(#28): the deadline gate owns this flag; the skeleton only carries it.
     def handler(ctx: Context) -> int:
         ctx.gate_writing = True
         raise RuntimeError(SECRET)

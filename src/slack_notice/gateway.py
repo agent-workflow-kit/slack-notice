@@ -40,7 +40,7 @@ import ssl
 import stat
 import time
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
 # Interface, "Input": at most 100 ms per slice so the main thread notices a deadline or signal;
 # a regular file is read in chunks of 64 KiB.
@@ -156,6 +156,11 @@ class Gateway(Protocol):
         ...
 
     def sleep(self, seconds: float) -> None: ...
+
+    def exit_now(self, code: int) -> NoReturn:
+        """End the process at once with ``code``: no ``atexit`` handler, no flush, no join of a
+        worker thread (``os._exit``). The only place that may do this; the caller flushes first."""
+        ...
 
     def resolve(self, host: str, port: int) -> list[str]:
         """Addresses of ``host`` (TCP). Raises ``OSError`` on failure."""
@@ -480,6 +485,11 @@ class SystemGateway:
     def sleep(self, seconds: float) -> None:
         if seconds > 0:
             time.sleep(seconds)
+
+    def exit_now(self, code: int) -> NoReturn:
+        if type(code) is not int or not 0 <= code <= 255:
+            raise ValueError("an exit code is an integer from 0 to 255")
+        os._exit(code)
 
     def resolve(self, host: str, port: int) -> list[str]:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
