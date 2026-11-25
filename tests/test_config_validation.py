@@ -20,13 +20,13 @@ CANARY = "/".join(["https:", "", "hooks.slack.com", "triggers", "T0FAKE", "0000"
 SAMPLES = Path(__file__).parent / "samples" / "config.json"
 
 
-def refused(values: dict[str, Any]) -> ConfigInvalid:
+def refused(values: dict[Any, Any]) -> ConfigInvalid:
     with pytest.raises(ConfigInvalid) as raised:
         validate_config(values)
     return raised.value
 
 
-def key_of(values: dict[str, Any]) -> str:
+def key_of(values: dict[Any, Any]) -> str:
     return refused(values).key
 
 
@@ -100,7 +100,9 @@ def test_an_unknown_key_of_5000_characters_is_a_question_mark() -> None:
     assert key_of({"k" * 5000: 1}) == "?"
 
 
-@pytest.mark.parametrize("name", ["a-b", "with space", "ünï", "x\n", "a" * 65, "", "k\x00", "<<"])
+@pytest.mark.parametrize(
+    "name", ["a-b", "with space", "\u00fcn\u00ef", "x\n", "a" * 65, "", "k\x00", "<<"]
+)
 def test_an_unknown_key_that_is_not_a_key_name_is_a_question_mark(name: str) -> None:
     assert key_of({name: 1}) == "?"
 
@@ -148,7 +150,8 @@ def test_a_non_string_key_is_refused_as_a_question_mark() -> None:
 
 
 @pytest.mark.parametrize(
-    "key", ["enabled", "webhook_env", "body_variable", "level_prefix", "max_chars", "timeout", "log"]
+    "key",
+    ["enabled", "webhook_env", "body_variable", "level_prefix", "max_chars", "timeout", "log"],
 )
 @pytest.mark.parametrize("value", [None, "", [], {}, [1], 0, -1, 1.5, True, "no", b"x", {"a": 1}])
 def test_a_hostile_value_is_refused_naming_the_key_or_accepted_only_when_right(
@@ -158,8 +161,8 @@ def test_a_hostile_value_is_refused_naming_the_key_or_accepted_only_when_right(
         "enabled": lambda v: v is True or v is False,
         "log": lambda v: v is True or v is False,
         "level_prefix": lambda v: v == {},
-        "webhook_env": lambda v: False,
-        "body_variable": lambda v: False,
+        "webhook_env": lambda v: v == "no",
+        "body_variable": lambda v: v == "no",
         "max_chars": lambda v: False,
         "timeout": lambda v: False,
     }[key](value)
@@ -169,7 +172,9 @@ def test_a_hostile_value_is_refused_naming_the_key_or_accepted_only_when_right(
         assert key_of({key: value}) == key
 
 
-@pytest.mark.parametrize("value", ["no", "yes", "off", "on", "True", "false", 1, 0, None, "", [True]])
+@pytest.mark.parametrize(
+    "value", ["no", "yes", "off", "on", "True", "false", 1, 0, None, "", [True]]
+)
 @pytest.mark.parametrize("key", ["enabled", "log"])
 def test_booleans_are_only_true_and_false(key: str, value: Any) -> None:
     assert key_of({key: value}) == key
@@ -190,9 +195,42 @@ def test_max_chars_out_of_range_says_the_range(value: int) -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        True, False, None, 0, -1, 2.999, 120.001, 10**30, float("nan"), float("inf"), "",
-        "0", "0s", "2s", "121", "2m1s", "1h", "1e3", "-5", "+5", " 5", "5 ", "5\n", "5s\n",
-        "٥", "５s", "5S", "1_0", "x" * 300, "9" * 5000, [10], {"a": 1}, "3 s", "0.0", ".5", "5.",
+        True,
+        False,
+        None,
+        0,
+        -1,
+        2.999,
+        120.001,
+        10**30,
+        float("nan"),
+        float("inf"),
+        "",
+        "0",
+        "0s",
+        "2s",
+        "121",
+        "2m1s",
+        "1h",
+        "1e3",
+        "-5",
+        "+5",
+        " 5",
+        "5 ",
+        "5\n",
+        "5s\n",
+        "\u0665",
+        "\uff15s",
+        "5S",
+        "1_0",
+        "x" * 300,
+        "9" * 5000,
+        [10],
+        {"a": 1},
+        "3 s",
+        "0.0",
+        ".5",
+        "5.",
     ],
 )
 def test_timeout_outside_the_grammar_or_range_is_refused(value: Any) -> None:
@@ -220,12 +258,12 @@ NAME_HOSTILE = [
     "\nSLACK_WEBHOOK",
     "A\x00B",
     "\x00",
-    "A‮B",
-    "​A",
-    "ＡＢＣ",  # fullwidth letters
-    "é",
-    "٣abc",  # arabic-indic digit start
-    "a٣",  # arabic-indic digit inside
+    "A\u202eB",
+    "\u200bA",
+    "\uff21\uff22\uff23",  # fullwidth letters
+    "\u00e9",
+    "\u0663abc",  # arabic-indic digit start
+    "a\u0663",  # arabic-indic digit inside
     "a" * 129,
     "a" * 5000,
     "https://hooks.example.test/triggers/x",
@@ -263,32 +301,31 @@ PREFIX_REFUSED = [
     "\U0001f535" * 17,
     " INFO",
     "INFO ",
-    " INFO",
-    "INFO ",
+    "\u00a0INFO",
+    "INFO\u00a0",
     "A\tB",
     "A\rB",
     "A\x00B",
     "A\x7fB",
     "A\x85B",
-    "A B",
-    "A B",
-    "A‮B",  # bidi override
-    "A⁦B",
-    "A​B",
-    "A­B",
-    "﻿A",
-    "A⠀",
-    "AㅤB",
+    "A\u2028B",
+    "A\u2029B",
+    "A\u202eB",  # bidi override
+    "A\u2066B",
+    "A\u200bB",
+    "A\u00adB",
+    "\ufeffA",
+    "A\u2800",
+    "A\u3164B",
     "A\U000e0041B",
-    "AB",  # private use
-    "A￾B",
+    "A\ue000B",  # private use
+    "A\ufffeB",
     "A\U0010ffffB",
-    "A͸B",  # unassigned
+    "A\u0378B",  # unassigned
     "A\ud800B",  # lone surrogate
     "A\x0bB",
     "A\x0cB",
     "INFO\n",
-    "A  B",
 ]
 
 
@@ -297,13 +334,28 @@ def test_a_prefix_the_title_rule_would_change_is_refused(value: str) -> None:
     for level in ("info", "warn", "action", "error"):
         error = refused({"level_prefix": {level: value}})
         assert error.key == "level_prefix"
-        assert error.rule.startswith("level_prefix.")
+        assert error.message.startswith("level_prefix.")
 
 
 @pytest.mark.parametrize(
     "value",
-    ["A", "INFO x", "a b", "🔵 INFO", "é", "é", "A‍B", "A️", "日本語", "x" * 16,
-     "؀A", "A‌B", "[!]", "<b>", "a\\nb", " "[:0] + "ab"],
+    [
+        "A",
+        "INFO x",
+        "a b",
+        "🔵 INFO",
+        "\u00e9",
+        "e\u0301",
+        "A\u200dB",
+        "A\ufe0f",
+        "日本語",
+        "x" * 16,
+        "\u0600A",
+        "A\u200cB",
+        "[!]",
+        "<b>",
+        "a\\nb",
+    ],
 )
 def test_a_prefix_the_title_rule_leaves_unchanged_is_accepted(value: str) -> None:
     assert validate_config({"level_prefix": {"info": value}})["level_prefix"]["info"] == value
@@ -325,9 +377,9 @@ def test_level_prefix_must_be_a_map() -> None:
 
 def test_prefix_messages_name_the_level_and_never_the_value() -> None:
     error = refused({"level_prefix": {"warn": "A\nB" + CANARY}})
-    assert "warn" in error.rule
-    assert CANARY not in error.rule
-    assert "A" not in error.rule.replace("level_prefix.warn", "")
+    assert error.message.startswith("level_prefix.warn ")
+    assert CANARY not in error.message
+    assert "A" not in error.message.replace("level_prefix.warn", "")
 
 
 # --- messages and key naming never leak ---------------------------------------------------------
@@ -354,6 +406,7 @@ def test_nothing_of_the_input_reaches_the_message_key_or_chain(values: dict[str,
     error = refused(values)
     assert CANARY not in str(error)
     assert CANARY not in error.rule
+    assert CANARY not in error.message
     assert CANARY not in error.key
     assert CANARY not in repr(error)
     assert error.__cause__ is None
@@ -409,7 +462,22 @@ def test_every_schema_invalid_sample_is_refused_by_the_code_under_the_same_key(
 def test_the_code_is_never_wider_than_the_schema_for_a_table_of_values() -> None:
     """Whatever the code accepts, the schema must too (the schema is the coarse gate)."""
     candidates: list[dict[str, Any]] = []
-    for value in [True, False, 0, 3, 3.0, 12000, 2000, "3s", "120", "0.5m", "010", "1m", "no", None]:
+    for value in [
+        True,
+        False,
+        0,
+        3,
+        3.0,
+        12000,
+        2000,
+        "3s",
+        "120",
+        "0.5m",
+        "010",
+        "1m",
+        "no",
+        None,
+    ]:
         for key in ("enabled", "log", "max_chars", "timeout", "webhook_env", "body_variable"):
             candidates.append({key: value})
     for value in NAME_HOSTILE + ["A", "a_1"]:

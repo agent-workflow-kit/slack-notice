@@ -7,11 +7,10 @@ Every failure is ``ConfigInvalid`` with a fixed message and a ``key`` that is ``
 missing file named by the flag) or an absolute file path, never content, so it can never equal
 the reserved sentinel values ``home`` and ``--config`` otherwise.
 
-TODO(#11): validate the merged values (types, ranges, unknown keys; unknown keys are refused
-before their value is examined).
-TODO(#11): implement config validation: validate `timeout` with `check_duration`; a DurationError
-becomes exit 2 config_invalid, details.key its `key`; build the message from key and rule only
-(Pydantic wraps ValueError and keeps the input in its error dict).
+Validation (``validate_config``) checks the merged values with Pydantic: unknown keys first (refused
+before their value is examined), then types and rules. A failure is ``ConfigInvalid`` whose ``key``
+is a config key name (or ``?``) and whose ``message`` is built from the key path and the rule only:
+Pydantic's input value is never used, and no Pydantic exception is kept as cause or context.
 """
 
 from __future__ import annotations
@@ -20,11 +19,14 @@ import copy
 import math
 import os
 import re
+import unicodedata
 from collections.abc import Hashable
 from fractions import Fraction
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import yaml
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, ValidationError, field_validator
+from pydantic_core import PydanticCustomError
 from yaml.events import AliasEvent, MappingStartEvent, SequenceStartEvent
 
 from slack_notice.gateway import HomeLookupError
@@ -165,12 +167,17 @@ class YamlRefused(ValueError):
 
 
 class ConfigInvalid(Exception):
-    """A config file cannot be used. ``key`` is ``--config`` or the absolute path of the file
-    (or directory); the message is fixed and no cause or context is kept."""
+    """A config file or value cannot be used. ``key`` is ``--config``, the absolute path of the
+    file (or directory), or a config key name (``?`` when it is not one); ``str()`` is the fixed
+    message and no cause or context is kept. ``rule`` and ``message`` are set by validation only:
+    ``rule`` is what the value must be, ``message`` is ``<key path> <rule>``; neither holds a
+    value."""
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str, rule: str = "", message: str = "") -> None:
         super().__init__(FIXED_MESSAGE)
         self.key = key
+        self.rule = rule
+        self.message = message
 
 
 class _StrictLoader(yaml.SafeLoader):
@@ -359,6 +366,15 @@ def _read(gateway: Gateway, path: str) -> tuple[str, bytes]:
         return "bad", b""
 
 
+def config_file_key(gateway: Gateway, *, home: str | None, config_path: str | None) -> str:
+    """The details.key naming the main config file (for a failure no single file explains)."""
+    if config_path is not None:
+        return _display(gateway, config_path)
+    if home is None:
+        return "?"
+    return _display(gateway, os.path.join(home, ".config", "slack-notice", "config.yaml"))
+
+
 def load_config(gateway: Gateway, *, home: str | None, config_path: str | None) -> dict[str, Any]:
     """The merged raw mapping of the config file and its drop-ins.
 
@@ -414,3 +430,191 @@ def _list(gateway: Gateway, directory: str) -> tuple[str, list[str]]:
         return "ok", []
     except Exception:
         return "bad", []
+
+
+# --- validation -------------------------------------------------------------------------------
+
+_KEY_NAME = re.compile(r"[A-Za-z0-9_]{1,64}", re.ASCII)
+_RESERVED_KEYS = ("home", "--config")  # sentinel values of details.key: never a key name
+_WEBHOOK_ENV = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}", re.ASCII)
+_BODY_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}", re.ASCII)
+_PREFIX_LENGTH = 16
+_MAX_CHARS_RANGE = (2000, 12000)
+_LEVELS = ("info", "warn", "action", "error")
+
+# The invisible format and filler characters of the sanitizer table (interface.md, Sanitizer,
+# step 3), as inclusive ranges.
+_INVISIBLE = (
+    (0x00AD, 0x00AD), (0x061C, 0x061C), (0x180E, 0x180E), (0x200B, 0x200B),
+    (0x200E, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0xFEFF, 0xFEFF),
+    (0xFFF9, 0xFFFB), (0xE0000, 0xE007F), (0xE0100, 0xE01EF), (0x115F, 0x1160),
+    (0x3164, 0x3164), (0xFFA0, 0xFFA0), (0x2800, 0x2800), (0x180B, 0x180D), (0x180F, 0x180F),
+)  # fmt: skip
+
+
+def _removed(char: str) -> bool:
+    """Step 3 of the sanitizer: removed characters (Cc but LF, Cs, Co, Cn, the explicit list)."""
+    code = ord(char)
+    if char != "\n" and unicodedata.category(char) in ("Cc", "Cs", "Co", "Cn"):
+        return True
+    return any(low <= code <= high for low, high in _INVISIBLE)
+
+
+def _title_rule(text: str) -> str:
+    """The title rule: sanitizer steps 2 to 5 (step 1, strict UTF-8, is the caller's).
+
+    TODO(#17): the sanitizer of the payload module is the one shared rule; replace this copy of
+    interface.md's steps by it when it exists (the tests pin both to the same table).
+    """
+    text = text.replace("\r\n", "\n")
+    for char in ("\r", "\x85", "\u2028", "\u2029"):
+        text = text.replace(char, "\n")
+    text = text.replace("\t", " ")
+    text = "".join(char for char in text if not _removed(char))
+    text = "\n".join(line.rstrip() for line in text.split("\n"))
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    text = text.strip()
+    text = text.replace("\n", " ")
+    while "  " in text:
+        text = text.replace("  ", " ")
+    return text.strip()
+
+
+def _prefix_ok(text: str) -> bool:
+    """1 to 16 code points that the title rule leaves unchanged (and valid UTF-8)."""
+    if not 1 <= len(text) <= _PREFIX_LENGTH:
+        return False
+    try:
+        text.encode("utf-8")  # step 1: a lone surrogate is refused
+    except UnicodeEncodeError:
+        return False
+    return _title_rule(text) == text
+
+
+def _name(pattern: re.Pattern[str], value: str) -> str:
+    if pattern.fullmatch(value) is None:  # fullmatch: a trailing newline never passes
+        raise PydanticCustomError("name", "bad name")
+    return value
+
+
+class _LevelPrefix(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    info: str
+    warn: str
+    action: str
+    error: str
+
+    @field_validator("*")
+    @classmethod
+    def _title_rule_unchanged(cls, value: str) -> str:
+        if not _prefix_ok(value):
+            raise PydanticCustomError("prefix", "bad prefix")
+        return value
+
+
+class _Settings(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    enabled: StrictBool
+    webhook_env: str
+    body_variable: str
+    level_prefix: _LevelPrefix
+    max_chars: Annotated[int, Field(ge=_MAX_CHARS_RANGE[0], le=_MAX_CHARS_RANGE[1])]
+    timeout: Any
+    log: StrictBool
+
+    @field_validator("webhook_env")
+    @classmethod
+    def _webhook_env(cls, value: str) -> str:
+        return _name(_WEBHOOK_ENV, value)
+
+    @field_validator("body_variable")
+    @classmethod
+    def _body_variable(cls, value: str) -> str:
+        return _name(_BODY_VARIABLE, value)
+
+    @field_validator("timeout", mode="before")
+    @classmethod
+    def _timeout(cls, value: Any) -> float:
+        try:
+            return check_duration("timeout", value)
+        except DurationError:
+            raise PydanticCustomError("duration", "bad duration") from None
+
+
+_INTEGER_RULE = f"must be an integer from {_MAX_CHARS_RANGE[0]} to {_MAX_CHARS_RANGE[1]}"
+# Rule text by Pydantic error type. The text never depends on the input.
+_RULES = {
+    "bool_type": "must be true or false",
+    "string_type": "must be a string",
+    "int_type": _INTEGER_RULE,
+    "int_parsing": _INTEGER_RULE,
+    "int_from_float": _INTEGER_RULE,
+    "greater_than_equal": _INTEGER_RULE,
+    "less_than_equal": _INTEGER_RULE,
+    "model_type": "must be a mapping",
+    "dict_type": "must be a mapping",
+    "name": "must be a variable name",
+    "prefix": (
+        f"must be one line of 1 to {_PREFIX_LENGTH} characters that the title rule leaves unchanged"
+    ),
+    "duration": f"must be a duration from {DURATION_RANGES['timeout'][0]}s "
+    f"to {DURATION_RANGES['timeout'][1]}s",
+    "extra_forbidden": "is not a known key",
+    "missing": "is required",
+}
+
+
+def _key_label(key: object) -> str:
+    """A key name for details.key: ASCII word characters, at most 64, never a sentinel."""
+    if isinstance(key, str) and key not in _RESERVED_KEYS and _KEY_NAME.fullmatch(key):
+        return key
+    return "?"
+
+
+def _unknown_key(values: dict[Any, Any]) -> str | None:
+    """The label of the first unknown key, looking at keys only, never at values."""
+    for key in values:
+        if key not in DEFAULTS:
+            return _key_label(key)
+    level_prefix = values.get("level_prefix")
+    if isinstance(level_prefix, dict) and any(key not in _LEVELS for key in level_prefix):
+        return "level_prefix"
+    return None
+
+
+def validate_config(values: dict[Any, Any], *, fallback_key: str = "?") -> dict[str, Any]:
+    """The settings: ``values`` over the defaults, validated, with ``timeout`` in seconds.
+
+    Order: unknown keys (named without looking at their values), then the first invalid known
+    key in table order. Raises ``ConfigInvalid`` with ``key`` a config key name or ``?`` and
+    ``message`` built from the key path and the rule. Any other failure of the machinery
+    (``RecursionError``, ``MemoryError``, ...) is ``ConfigInvalid`` with ``fallback_key`` (the
+    file the caller names). ``values`` is not changed.
+    """
+    failure: ConfigInvalid | None = None
+    result: dict[str, Any] = {}
+    try:
+        unknown = _unknown_key(values)
+        if unknown is not None:
+            failure = ConfigInvalid(unknown, "is not a known key", f"{unknown} is not a known key")
+        else:
+            merged = resolve_settings(values, {})
+            result = _Settings.model_validate(merged).model_dump()
+    except ValidationError as error:
+        failure = _failure_of(error)
+    except Exception:
+        failure = ConfigInvalid(fallback_key, "is invalid", f"{fallback_key} is invalid")
+    if failure is not None:  # raised outside the handlers: no cause or context is kept
+        raise failure
+    return result
+
+
+def _failure_of(error: ValidationError) -> ConfigInvalid:
+    """The first error (table order) as a ConfigInvalid; only ``loc`` and ``type`` are used."""
+    first = error.errors(include_input=False, include_url=False, include_context=False)[0]
+    path = [part for part in first["loc"] if part in DEFAULTS or part in _LEVELS]
+    key = str(path[0]) if path and path[0] in DEFAULTS else "?"
+    where = ".".join(str(part) for part in path) if key != "?" else "?"
+    rule = _RULES.get(first["type"], "is invalid")
+    return ConfigInvalid(key, rule, f"{where} {rule}")
