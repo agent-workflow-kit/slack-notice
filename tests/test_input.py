@@ -25,7 +25,7 @@ CAP = 1_048_576
 CANARY = "CAN" + "ARY-" + "7f3a"
 
 
-# --- parse_notification_json: the hardened parser -------------------------------------------
+# --- decode_notification: the hardened parser -------------------------------------------
 
 
 def refusal(data: bytes) -> payload.InputRefused:
@@ -140,18 +140,16 @@ def test_huge_integers_are_refused(digits: int) -> None:
     assert refusal(data).reason == "invalid"
 
 
-def test_a_one_mib_integer_string_is_refused_under_any_digit_limit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_one_mib_integer_string_is_refused_under_any_digit_limit() -> None:
     import sys
 
-    monkeypatch.setattr(sys, "set_int_max_str_digits", sys.set_int_max_str_digits, raising=False)
+    saved = sys.get_int_max_str_digits()
     sys.set_int_max_str_digits(0)  # the limit is off: the parser must still never build the int
     try:
         data = b'{"message":' + b"9" * (CAP - 20) + b"}"
         assert refusal(data).reason == "invalid"
     finally:
-        sys.set_int_max_str_digits(4300)
+        sys.set_int_max_str_digits(saved)
 
 
 @pytest.mark.parametrize("exc", [ValueError, RecursionError, OverflowError])
@@ -193,7 +191,7 @@ def test_empty_object_and_missing_message_are_left_to_validation() -> None:
     assert payload.decode_notification(b'{"title":"x"}') == {"title": "x"}
 
 
-# --- read_input_source: gateway results to errors --------------------------------------------
+# --- read_notification: gateway results to errors --------------------------------------------
 
 
 def read(gateway: FakeGateway, source: int | str, remaining: float = 5.0) -> dict[str, Any]:
@@ -371,14 +369,12 @@ def test_stdin_is_read_from_descriptor_zero(
         return real(source, max_bytes, remaining)
 
     fake_gateway.read_source = spy  # type: ignore[method-assign]
-    fake_gateway.source_script.append(SourceRead(b'{"message":"x"}'))
     for argv in (["send", "--stdin-json"], ["send"], ["send", "--file", "-"]):
         fake_gateway.source_script.append(SourceRead(b'{"message":"x"}'))
         result = run_read(argv, fake_gateway, monkeypatch)
         assert result.code == 0
         assert result.value == {"message": "x"}
-    assert sources[-3:] == [0, 0, 0]
-    fake_gateway.source_script.clear()
+    assert sources == [0, 0, 0]
 
 
 def test_file_path_is_read_as_a_path(
@@ -516,17 +512,15 @@ def test_a_terminal_does_not_stop_a_named_file(
     assert result.code == 0
 
 
-def test_the_terminal_check_wins_over_a_bad_config_and_a_disabled_tool(
-    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+def test_the_terminal_check_runs_before_any_home_lookup(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    result = run_read(
-        ["send", "--stdin-json", "--json", "--config", "/nonexistent/c.yaml"],
-        fake_gateway,
-        monkeypatch,
-        tty=True,
-    )
+    broken = FakeGateway(home=str(tmp_path / "gwhome"), home_error=True)
+    result = run_read(["send", "--stdin-json", "--json"], broken, monkeypatch, tty=True)
     assert result.code == 2
     assert result.error["code"] == "usage"
+    assert broken.home_lookups == 0
+    assert broken.source_reads == 0
 
 
 def test_input_text_never_reaches_stderr_or_stdout(
@@ -551,16 +545,71 @@ def test_input_text_never_reaches_stderr_or_stdout(
 def test_timeout_and_cap_messages_are_fixed_strings(
     fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    messages = set()
-    for item in (
-        SourceRead(b"x", timed_out=True),
-        SourceRead(b"x", timed_out=True),
-    ):
+    def message_of(item: SourceRead) -> str:
         fake_gateway.source_script.append(item)
-        messages.add(
-            run_read(["send", "--json", "--stdin-json"], fake_gateway, monkeypatch).error["message"]
-        )
-    assert len(messages) == 1
+        result = run_read(["send", "--json", "--stdin-json"], fake_gateway, monkeypatch)
+        return str(result.error["message"])
+
+    timeouts = {message_of(SourceRead(b"x" * n, timed_out=True)) for n in (1, 50)}
+    caps = {message_of(SourceRead(b"x" * n, too_large=True)) for n in (1, 50)}
+    assert timeouts == {cli.INPUT_TIMEOUT_MESSAGE}
+    assert caps == {payload.REFUSAL_MESSAGES["too_large"]}
+
+
+@pytest.mark.parametrize("reason", sorted(payload.REFUSAL_MESSAGES))
+def test_refusal_messages_are_fixed_per_reason(reason: str) -> None:
+    assert payload.InputRefused(reason).message == payload.REFUSAL_MESSAGES[reason]
+    assert len(set(payload.REFUSAL_MESSAGES.values())) == len(payload.REFUSAL_MESSAGES)
+
+
+def test_a_closed_stdin_is_empty_input_not_too_large(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With fd 0 closed at start, sys.stdin is None and descriptor 0 may be reused by something
+    # else: stdin is not read at all.
+    monkeypatch.setattr("sys.stdin", None)
+    for argv in (["send"], ["send", "--stdin-json"], ["send", "--file", "-"]):
+        result = run_read([*argv, "--json"], fake_gateway, monkeypatch)
+        assert result.code == 20
+        assert result.error["reason"] == "invalid_payload"
+        assert result.error["message"] == payload.REFUSAL_MESSAGES["invalid"]
+    assert fake_gateway.source_reads == 0
+
+
+@pytest.mark.parametrize(
+    ("data", "reason"),
+    [
+        (b"\xef\xbb\xbf{}", "bom"),
+        (CANARY.encode() + b"\xff", "utf8"),
+        (b'{"message":"' + CANARY.encode() + b'"', "invalid"),
+        (b'{"message":"' + CANARY.encode() + b'","message":"x"}', "invalid"),
+        (b"[" + CANARY.encode() + b"]", "invalid"),
+        (b'["' + CANARY.encode() + b'"]', "invalid"),
+    ],
+)
+def test_refusals_keep_no_exception_chain(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch, data: bytes, reason: str
+) -> None:
+    err = refusal(data)
+    assert err.reason == reason
+    assert err.__cause__ is None
+    assert err.__context__ is None
+    caught: list[cli.CliError] = []
+
+    def handler(ctx: Context) -> int:
+        try:
+            cli.read_input(ctx, 10.0)
+        except cli.CliError as error:
+            caught.append(error)
+        return 0
+
+    monkeypatch.setitem(cli.HANDLERS, "send", handler)
+    fake_gateway.source_script.append(SourceRead(data))
+    streams = Streams(io.BytesIO(), io.BytesIO(), lambda: False)
+    main(["send", "--stdin-json"], {}, fake_gateway, streams)
+    assert len(caught) == 1
+    assert caught[0].__cause__ is None
+    assert caught[0].__context__ is None
 
 
 def test_read_input_is_not_called_by_parsing_alone(

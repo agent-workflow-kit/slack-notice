@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from typing import Any, NoReturn
 
-from slack_notice.gateway import Gateway, NotRegularFile
+from slack_notice.gateway import Gateway, NotRegularFile, SourceRead
 
 MAX_INPUT_BYTES = 1_048_576
 UTF8_BOM = b"\xef\xbb\xbf"
@@ -82,17 +82,15 @@ def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def decode_notification(data: bytes) -> dict[str, Any]:
-    """Decode and parse input bytes; raise ``InputRefused`` for anything but an object.
-
-    Fields are not validated here (TODO(#16)).
-    """
+def _parse(data: bytes) -> tuple[dict[str, Any] | None, str]:
+    """Return ``(object, "")`` or ``(None, reason)``. Every exception ends here, so the caller
+    can raise outside a handler and the refusal keeps no ``__context__`` (it would hold input)."""
     if data.startswith(UTF8_BOM):
-        raise InputRefused("bom")
+        return None, "bom"
     try:
         text = data.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
-        raise InputRefused("utf8") from None
+        return None, "utf8"
     try:
         value = json.loads(
             text,
@@ -102,9 +100,21 @@ def decode_notification(data: bytes) -> dict[str, Any]:
             object_pairs_hook=_object_without_duplicates,
         )
     except (ValueError, RecursionError, OverflowError):
-        raise InputRefused("invalid") from None
+        return None, "invalid"
     if not isinstance(value, dict):
-        raise InputRefused("invalid")
+        return None, "invalid"
+    return value, ""
+
+
+def decode_notification(data: bytes) -> dict[str, Any]:
+    """Decode and parse input bytes; raise ``InputRefused`` for anything but an object.
+
+    Fields are not validated here (TODO(#16)). The refusal has no ``__cause__`` or
+    ``__context__``: they would carry the input.
+    """
+    value, reason = _parse(data)
+    if value is None:
+        raise InputRefused(reason)
     return value
 
 
@@ -115,10 +125,14 @@ def read_notification(gateway: Gateway, source: int | str, remaining: float) -> 
     ``InputTimedOut`` whatever arrived. A path problem is ``SourceUnusable``. The input is
     never echoed in an error.
     """
+    failed = False
+    result: SourceRead | None = None
     try:
         result = gateway.read_source(source, MAX_INPUT_BYTES, remaining)
     except (OSError, NotRegularFile, ValueError):
-        raise SourceUnusable from None
+        failed = True
+    if failed or result is None:  # raised outside the handler: the error keeps no context
+        raise SourceUnusable
     if result.timed_out:
         raise InputTimedOut
     if result.too_large:

@@ -45,7 +45,13 @@ from slack_notice.config import (
 )
 from slack_notice.gateway import Gateway, SystemGateway
 from slack_notice.log import StateDir
-from slack_notice.payload import InputRefused, InputTimedOut, SourceUnusable, read_notification
+from slack_notice.payload import (
+    InputRefused,
+    InputTimedOut,
+    SourceUnusable,
+    decode_notification,
+    read_notification,
+)
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
 ERROR_EXIT_CODES = frozenset({1, 2, 12, 20})
@@ -409,7 +415,8 @@ def parse(argv: Sequence[str]) -> argparse.Namespace:
         raise usage_error("--actor must be human:<name> or auto:<name>")
     # An empty --config path is a missing file (config_invalid, details.key --config): config
     # loading decides it (load_settings), not the parser.
-    # TODO(#16): the other flag combinations of send and the checks of the flag values.
+    # TODO(#16): the other flag combinations of send (including stdin that is a terminal with no
+    # source and no --message) and the checks of the flag values.
     return args
 
 
@@ -470,27 +477,33 @@ def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
     """
     file_arg: str | None = ctx.args.file
     source: int | str = 0 if file_arg is None or file_arg == "-" else file_arg
+    error: CliError | None = None
     try:
+        if source == 0 and sys.stdin is None:
+            # stdin was closed at start (`<&-`): descriptor 0 may now be something else, so it
+            # is not read; a closed stdin is empty input.
+            return decode_notification(b"")
         return read_notification(ctx.gateway, source, remaining)
     except InputRefused as refused:
-        raise CliError(
+        error = CliError(
             20,
             "refused",
             refused.message,
             reason="invalid_payload",
             details={"pointer": refused.pointer},
-        ) from None
+        )
     except InputTimedOut:
-        raise CliError(
+        error = CliError(
             12,
             "unavailable",
             INPUT_TIMEOUT_MESSAGE,
             details={"phase": "input"},
             retryable=True,
             unknown_outcome=False,
-        ) from None
+        )
     except SourceUnusable:
-        raise usage_error(INPUT_FILE_MESSAGE) from None
+        error = usage_error(INPUT_FILE_MESSAGE)
+    raise error  # raised outside the handlers: no __context__ (it would hold input text)
 
 
 def _not_implemented(_ctx: Context) -> int:
