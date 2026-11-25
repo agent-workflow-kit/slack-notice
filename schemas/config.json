@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/config.json",
   "title": "slack-notice config",
-  "description": ".config/slack-notice/config.yaml under the home directory from the password database (HOME and XDG_CONFIG_HOME are not read; an unusable home directory is exit 2 with key home) plus config.d/*.yaml beside it in lexical order. Invalid config exits 2 (config_invalid), naming the key. Drop-ins: maps merge. Precedence: flags, then config, then defaults; there are no environment overrides. Files are parsed with a strict YAML loader (duplicate keys, tags, anchors and aliases refused, so `<<: *alias` is refused because the alias is, while a literal `<<` key is an ordinary string key refused later as unknown; and hex, octal, sexagesimal, leading-zero and .inf/.nan numbers refused), regular files of at most 65536 bytes. Self-contained: no external references.",
+  "description": ".config/slack-notice/config.yaml under the home directory from the password database (HOME and XDG_CONFIG_HOME are not read; an unusable home directory is exit 2 with key home) plus config.d/*.yaml beside it in lexical order. Invalid config exits 2 (config_invalid), naming the key. Drop-ins: maps merge. Precedence: config over defaults (no flag names a setting); there are no environment overrides. Files are parsed with a strict YAML loader (duplicate keys, tags, anchors and aliases refused, so `<<: *alias` is refused because the alias is, while a literal `<<` key is an ordinary string key refused later as unknown; and hex, octal, sexagesimal, leading-zero and .inf/.nan numbers refused), regular files of at most 65536 bytes. Self-contained: no external references.",
   "$defs": {
     "duration": {
       "anyOf": [

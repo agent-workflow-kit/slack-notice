@@ -2,7 +2,7 @@
 
 Loading (interface.md, Config): ``load_config`` reads the config file and ``config.d/*.yaml``
 through the gateway, parses each with a strict YAML loader and merges the maps. The result is
-the raw merged mapping; ``resolve_settings`` layers it over the defaults (and flags over it).
+the raw merged mapping; ``resolve_settings`` layers it over the defaults (reserved flags over that).
 Every failure is ``ConfigInvalid`` with a fixed message and a ``key`` that is ``--config`` (a
 missing file named by the flag) or an absolute file path, never content, so it can never equal
 the reserved sentinel values ``home`` and ``--config`` otherwise.
@@ -332,7 +332,9 @@ def _merge(base: dict[str, Any], over: dict[str, Any]) -> dict[str, Any]:
 def resolve_settings(
     config_values: dict[str, Any], flags: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Precedence: flags, then config, then defaults. A flag that was not given is ``None``.
+    """Precedence: config over defaults. A flag that was not given is ``None``.
+
+    ``flags`` is reserved: no flag of the interface names a setting, so callers pass none.
 
     There is no environment layer: nothing in the environment overrides a setting.
     """

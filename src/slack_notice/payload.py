@@ -10,7 +10,10 @@ carries no input text:
 
 Errors are plain exceptions with fixed text; ``cli`` maps them to exit codes and the envelope.
 
-TODO(#16): implement notification validation and flag combinations.
+- ``validate_notification(value)`` checks the fields of a decoded object (structure and type only),
+  and ``notification_from_flags`` forms the same object from the flags, so a flag value and a JSON
+  field meet one rule and one pointer.
+
 TODO(#17): implement the sanitizer (including lone surrogates that arrive as JSON escapes).
 TODO(#18): implement the link rule.
 """
@@ -18,12 +21,22 @@ TODO(#18): implement the link rule.
 from __future__ import annotations
 
 import json
+import re
+from collections.abc import Mapping
 from typing import Any, NoReturn
 
 from slack_notice.gateway import Gateway, NotRegularFile, SourceRead
 
 MAX_INPUT_BYTES = 1_048_576
 UTF8_BOM = b"\xef\xbb\xbf"
+
+# interface.md, Notification: the fields, in table order, and the limits of the raw input.
+FIELDS = ("title", "message", "level", "link")
+LEVELS = ("info", "warn", "action", "error")
+MAX_TEXT_CHARS = 100_000
+# A field name that matches is shown in the pointer; any other name (every unknown key is
+# attacker text) is `?`.
+FIELD_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # Reasons of InputRefused (all exit 20 invalid_payload, pointer ""), with their fixed messages.
 REFUSAL_MESSAGES = {
@@ -109,8 +122,8 @@ def _parse(data: bytes) -> tuple[dict[str, Any] | None, str]:
 def decode_notification(data: bytes) -> dict[str, Any]:
     """Decode and parse input bytes; raise ``InputRefused`` for anything but an object.
 
-    Fields are not validated here (TODO(#16)). The refusal has no ``__cause__`` or
-    ``__context__``: they would carry the input.
+    Fields are not validated here (see ``validate_notification``). The refusal has no
+    ``__cause__`` or ``__context__``: they would carry the input.
     """
     value, reason = _parse(data)
     if value is None:
@@ -138,3 +151,84 @@ def read_notification(gateway: Gateway, source: int | str, remaining: float) -> 
     if result.too_large:
         raise InputRefused("too_large")
     return decode_notification(result.data)
+
+
+# --- field validation --------------------------------------------------------------------------
+
+# Fixed messages by rule: they never hold a name or a value taken from the input.
+FIELD_MESSAGES = {
+    "not_object": "a notification is a JSON object",
+    "unknown": "the notification has a field that is not title, message, level or link",
+    "type": "the field must be a string",
+    "level": "level must be one of info, warn, action, error",
+    "length": f"the field is longer than {MAX_TEXT_CHARS} characters",
+}
+
+
+class FieldRefused(Exception):  # noqa: N818
+    """A field breaks a rule. Exit 20 ``invalid_payload`` with ``details.pointer`` set.
+
+    ``pointer`` is ``""`` (the whole input), ``/<field>`` for a known field or a field name that
+    matches ``[A-Za-z0-9_-]{1,64}``, and ``/?`` for any other name. ``message`` is fixed by rule.
+    """
+
+    def __init__(self, rule: str, pointer: str) -> None:
+        super().__init__(rule)
+        self.rule = rule
+        self.pointer = pointer
+
+    @property
+    def message(self) -> str:
+        return FIELD_MESSAGES[self.rule]
+
+
+def _pointer_name(key: object) -> str:
+    if isinstance(key, str) and len(key) <= 64 and FIELD_NAME.fullmatch(key) is not None:
+        return key
+    return "?"
+
+
+def _refusal(value: Mapping[Any, Any]) -> FieldRefused | None:
+    """The first broken rule, or None. Looks at each value's type and, for a string, its length;
+    never into a value (a list or object is one wrong type however deep), so nesting costs
+    nothing. Order: unknown fields (in input order), then title, message, level, link."""
+    for key in value:
+        if key not in FIELDS:  # str.__eq__ per known name: a non-string key is just unknown
+            return FieldRefused("unknown", "/" + _pointer_name(key))
+    for name in FIELDS:
+        if name not in value:
+            continue
+        item = value[name]
+        if not isinstance(item, str):
+            return FieldRefused("type", "/" + name)
+        if name == "level" and item not in LEVELS:
+            return FieldRefused("level", "/level")
+        if name in ("title", "message") and len(item) > MAX_TEXT_CHARS:
+            return FieldRefused("length", "/" + name)
+    return None
+
+
+def validate_notification(value: object) -> dict[str, Any]:
+    """The notification as given, or ``FieldRefused``.
+
+    Only structure and type are judged here: a string field is any string up to the input limit
+    (an unusable level is refused here, being an enumeration). The raised error has no
+    ``__context__``.
+
+    TODO(#17): the absent or empty message (``empty_message``) and the sanitizer.
+    TODO(#18): the link rule (``link_invalid``, ``link_scheme``).
+    """
+    if not isinstance(value, dict):  # defensive: decode_notification already refuses non-objects
+        raise FieldRefused("not_object", "")
+    refusal = _refusal(value)
+    if refusal is not None:
+        raise refusal
+    return value
+
+
+def notification_from_flags(
+    *, title: str | None, message: str | None, level: str | None, link: str | None
+) -> dict[str, Any]:
+    """The object the flags form: only the flags that were given, validated like JSON input."""
+    given = {"title": title, "message": message, "level": level, "link": link}
+    return validate_notification({name: text for name, text in given.items() if text is not None})
