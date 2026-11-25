@@ -351,7 +351,8 @@ def test_fixed_prefix_words_in_a_report_are_not_secrets(word: str) -> None:
     rec.observe("V2", "x", f"{word} and hooks.slack.com seen")
     text = rec.to_text()
     assert word in text and rec.redactions == 0
-    assert "hooks.slack.com" in rec.to_json()
+    observed = json.loads(rec.to_json())["items"]["V2"]["observed"]["x"]
+    assert observed == f"{word} and hooks.slack.com seen"
 
 
 def test_only_the_segments_after_the_trigger_prefix_are_registered() -> None:
