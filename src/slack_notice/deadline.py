@@ -22,9 +22,9 @@ never joined, its socket is not touched by the main thread, and the process ends
 ``gateway.exit_now`` (``os._exit``) after the result is printed, flushed and logged.
 
 What this module does not do (owners in the TODOs): the signal handler lives in
-``cli._exit_on_signal`` (#27, done); the ``send`` flow that prints and logs is #28. The
-lock wait and the input read are outside the gate: they happen in the main thread before the
-worker starts and end the send with ``unavailable`` there.
+``cli._exit_on_signal`` (#27); the ``send`` flow that prints and logs is ``cli._real_send``
+(#28). The lock wait and the input read are outside the gate: they happen in the main thread
+before the worker starts and end the send with ``unavailable`` there.
 
 ``note_signal`` is called from a signal handler: it only sets a plain attribute and takes no lock
 (a handler runs between bytecodes of the main thread, which may hold the gate lock).
@@ -280,7 +280,7 @@ def attempt_work(
     ``MAX_CONNECTION_RETRIES`` after a failure while the gate was idle (``Outcome.retry``), so at
     most four attempts. Nothing else is retried: any other result, and every failure once the gate
     entered writing, ends the send. Each attempt takes ``enter_writing`` itself (and so re-runs the
-    gate's ``on_writing`` hook, the send lock's stamp of #28).
+    gate's ``on_writing`` hook, the send lock's stamp, see ``cli._stamp_hook``).
 
     A retry is preceded by a wait on the gateway clock. A wait that is as long as or longer than
     the time left ends the send at once, without sleeping, with the last result (a 429 then

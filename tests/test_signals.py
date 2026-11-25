@@ -1,7 +1,7 @@
 """Signals at every phase of the send (issue #27).
 
-The real ``send`` is wired by #28, so ``mimic_send`` runs the pieces it will wire, in the order
-of interface steps 5 to 7: ``_exit_on_signal`` with a ``_SignalGate``,
+The real ``send`` is tested end to end in test_send_runtime.py; ``mimic_send`` runs the pieces it
+wires, in the order of interface steps 5 to 7: ``_exit_on_signal`` with a ``_SignalGate``,
 ``gate.arm(deadline.note_signal)``, ``spacing.acquire(stop=...)``, ``Deadline.run`` on a real
 daemon worker, ``deadline.conclude`` (print and flush, then the log record, then the exit) and
 the fake gateway's ``exit_now``. Signals are real (``os.kill`` at this process) and go through
@@ -102,10 +102,10 @@ def mimic_send(
             try:
                 if before5 is not None:
                     before5()
-                # TODO(#28): the real send creates the Deadline at step 3 (it covers the input
-                # read); the harness creates it here, later, only for convenience. Arm before
-                # acquire (a signal during the lock wait is the deadline, not an exit), and
-                # commit when the result print starts (``emit`` below).
+                # The real send (cli._send_and_report) creates the Deadline at step 3 (it covers
+                # the input read); the harness creates it here, later, only for convenience.
+                # Arm before acquire (a signal during the lock wait is the deadline, not an
+                # exit), and commit when the result print starts (``emit`` below).
                 at = gateway.monotonic() + seconds
                 deadline = Deadline(gateway, at=at)
                 gate.arm(deadline.note_signal)  # step 5 begins

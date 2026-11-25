@@ -8,9 +8,6 @@ from __future__ import annotations
 
 import http.client
 import json
-import os
-import signal
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +18,6 @@ from slack_notice.gateway import SourceRead
 from slack_notice.render import render
 from tests.fake_gateway import (
     Attempt,
-    FakeConnection,
     FakeGateway,
     Reply,
     cert_verify_error,
@@ -299,7 +295,7 @@ def test_a_refusal_with_a_valid_level_logs_the_level(fake_gateway: FakeGateway) 
     assert (record["reason"], record["level"]) == ("empty_message", "error")
 
 
-# --- input timeout ---------------------------------------------------------------------------------
+# --- input timeout ---
 
 
 def test_an_input_timeout_is_unavailable_input_logged_as_failed(fake_gateway: FakeGateway) -> None:
