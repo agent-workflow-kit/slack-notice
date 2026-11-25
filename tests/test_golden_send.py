@@ -304,7 +304,7 @@ def run(scenario: Scenario, gateway: GoldenGateway, tmp_path: Path) -> Sent:
 def golden_gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     home = tmp_path / "gwhome"
     home.mkdir(mode=0o700)
-    gateway = GoldenGateway(home=str(home), uid=1000, login_name="tester", wall_start=WALL_START)
+    gateway = GoldenGateway(home=str(home), login_name="tester", wall_start=WALL_START)
     monkeypatch.setattr(cli, "__version__", VERSION)
     yield gateway
     gateway.release_stalls()
