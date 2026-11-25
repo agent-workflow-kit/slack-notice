@@ -1438,3 +1438,49 @@ def test_lock_is_exclusive_and_released(gateway: Gateway, tmp_path: Path) -> Non
     finally:
         for fd in (first, second, dir_fd):
             os.close(fd)
+
+
+# --- state file primitives for the log (issue #14) ---------------------------------------------
+
+
+def test_state_file_write_size_read_at_and_truncate(gateway: Gateway, tmp_path: Path) -> None:
+    dir_fd = gateway.open_state_dir(str(tmp_path / "home"))
+    fd = gateway.open_state_file(dir_fd, "log.jsonl", append=True)
+    try:
+        assert gateway.file_size(fd) == 0
+        assert gateway.write_fd(fd, b"abc\n") == 4
+        assert gateway.file_size(fd) == 4
+        assert gateway.read_at(fd, 1, 3) == b"\n"
+        assert gateway.read_at(fd, 5, 100) == b""
+        gateway.truncate_fd(fd, 2)
+        assert gateway.file_size(fd) == 2
+        assert gateway.write_fd(fd, b"Z") == 1  # O_APPEND: lands at the new end
+        assert gateway.read_at(fd, 10, 0) == b"abZ"
+    finally:
+        os.close(fd)
+        os.close(dir_fd)
+
+
+def test_rename_state_file_replaces_the_target_and_never_follows_links(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    dir_fd = gateway.open_state_dir(str(tmp_path / "home"))
+    leaf = tmp_path / "home" / ".local" / "state" / "slack-notice"
+    outside = tmp_path / "outside"
+    outside.write_text("keep")
+    try:
+        (leaf / "a").write_text("A")
+        (leaf / "b").symlink_to(outside)
+        gateway.rename_state_file(dir_fd, "a", "b")
+        assert (leaf / "b").read_text() == "A"
+        assert not (leaf / "b").is_symlink()
+        assert outside.read_text() == "keep"
+        with pytest.raises(FileNotFoundError):
+            gateway.rename_state_file(dir_fd, "missing", "b")
+        for bad in ("", "..", "x/y", "a\0b"):
+            with pytest.raises(ValueError):
+                gateway.rename_state_file(dir_fd, bad, "b")
+            with pytest.raises(ValueError):
+                gateway.rename_state_file(dir_fd, "b", bad)
+    finally:
+        os.close(dir_fd)
