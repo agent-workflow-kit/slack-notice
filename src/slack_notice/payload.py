@@ -254,15 +254,16 @@ LINK_MESSAGES = {
     "link_scheme": "the link scheme is not http or https",
 }
 # Step 1: 1 to 1024 printable ASCII characters (U+0021 to U+007E). fullmatch, never `$`.
-_LINK_FORM = re.compile(r"[\x21-\x7e]{1,1024}", re.ASCII)
+_LINK_FORM = re.compile(rf"[\x21-\x7e]{{1,{MAX_LINK_CHARS}}}", re.ASCII)
 # Step 2: a scheme token at the start.
 _LINK_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):", re.ASCII)
+_LINK_HTTP = re.compile(r"https?", re.ASCII | re.IGNORECASE)
 # Step 3: the whole link. T is one allowed character or one percent escape. No userinfo, no empty
 # host, no trailing dot; IPv6 only inside brackets.
 _T = r"(?:[A-Za-z0-9\-._~:/?@!$&'()*+,;=]|%[0-9A-Fa-f]{2})"
 _HOST = r"(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[(?P<v6>[0-9A-Fa-f:.]+)\])"
 _LINK_WHOLE = re.compile(
-    r"(?P<scheme>[Hh][Tt][Tt][Pp][Ss]?)://" + _HOST + r"(?::(?P<port>[0-9]{1,5}))?"
+    r"(?:[Hh][Tt][Tt][Pp][Ss]?)://" + _HOST + r"(?::(?P<port>[0-9]{1,5}))?"
     r"(?:[/?]" + _T + r"*)?(?:#" + _T + r"*)?",
     re.ASCII,
 )
@@ -286,7 +287,7 @@ def _link_reason(link: str) -> str | None:
     if _LINK_FORM.fullmatch(link) is None:
         return "link_invalid"
     scheme = _LINK_SCHEME.match(link)
-    if scheme is not None and scheme.group(1).lower() not in ("http", "https"):
+    if scheme is not None and _LINK_HTTP.fullmatch(scheme.group(1)) is None:
         return "link_scheme"
     match = _LINK_WHOLE.fullmatch(link)
     if match is None:

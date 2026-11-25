@@ -27,6 +27,11 @@ ACCEPTED = [
     ("HtTp://x.example/Path", "http://x.example/Path"),
     ("http://a.example", "http://a.example"),
     ("https://a.example/%41", "https://a.example/%41"),
+    ("https://a.example/%41%42", "https://a.example/%41%42"),
+    ("https://a.example/%aF", "https://a.example/%aF"),
+    ("https://a.example:80?x", "https://a.example:80?x"),
+    ("https://a.example:80#x", "https://a.example:80#x"),
+    ("https://[1:2:3:4:5:6:1.2.3.4]/", "https://[1:2:3:4:5:6:1.2.3.4]/"),
     ("https://a.example/p'q(r)", "https://a.example/p'q(r)"),
     ("https://[::1]/", "https://[::1]/"),
     ("https://[2001:db8::1]:8443/x", "https://[2001:db8::1]:8443/x"),
@@ -164,7 +169,8 @@ def test_a_refused_link_has_its_reason_and_a_fixed_message(link: str, reason: st
         check_link(link)
     assert caught.value.reason == reason
     assert caught.value.message == payload.LINK_MESSAGES[reason]
-    assert (not link or link not in caught.value.message) and not caught.value.args[1:]
+    assert caught.value.message == payload.LINK_MESSAGES[reason]
+    assert not caught.value.args[1:]
     assert caught.value.__context__ is None and caught.value.__cause__ is None
 
 
@@ -204,21 +210,82 @@ def test_a_lone_surrogate_is_invalid_payload_at_link_before_the_rule() -> None:
     assert caught.value.pointer == "/link" and caught.value.rule == "surrogate"
 
 
+_BANNED_ROOTS = {"urllib", "urllib3", "yarl", "http", "importlib"}
+_BANNED_NAMES = {
+    "urlparse",
+    "urlsplit",
+    "urlunparse",
+    "urlunsplit",
+    "urljoin",
+    "urldefrag",
+    "parse_url",
+    "__import__",
+}
+
+
+# The package version is read from the installed metadata: importlib.metadata cannot import code.
+_ALLOWED_MODULES = {"importlib.metadata"}
+
+
+def url_parser_uses(source: str) -> list[str]:
+    """Every way the source could reach a URL parser, by import, name, getattr or string."""
+    found: list[str] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found += [
+                a.name
+                for a in node.names
+                if a.name.split(".")[0] in _BANNED_ROOTS and a.name not in _ALLOWED_MODULES
+            ]
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module.split(".")[0] in _BANNED_ROOTS and module not in _ALLOWED_MODULES:
+                found.append(module)
+        elif isinstance(node, ast.Name | ast.Attribute):
+            name = node.id if isinstance(node, ast.Name) else node.attr
+            if name in _BANNED_NAMES:
+                found.append(name)
+        elif isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name) and func.id == "getattr":
+                second = node.args[1] if len(node.args) > 1 else None
+                if not (isinstance(second, ast.Constant) and isinstance(second.value, str)):
+                    found.append("getattr")
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            value = node.value
+            root = value.split(".")[0]
+            if " " not in value and root in _BANNED_ROOTS and value not in _ALLOWED_MODULES:
+                found.append(value)
+    return found
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "from urllib.parse import urljoin",
+        "from urllib.parse import urlsplit as s",
+        "import urllib.parse as u",
+        "from http import client as c",
+        "__import__('urllib.parse')",
+        "import importlib\nimportlib.import_module('x')",
+        "x = getattr(m, name)",
+        "name = 'urllib.parse'",
+        "m.urlparse(x)",
+    ],
+)
+def test_the_url_parser_check_flags_evasive_code(snippet: str) -> None:
+    assert url_parser_uses(snippet)
+
+
+def test_the_url_parser_check_passes_clean_code() -> None:
+    assert not url_parser_uses("import re\nx = getattr(m, 'a')\ny = re.compile('a.b')")
+
+
 def test_no_code_path_calls_a_url_parser() -> None:
-    banned = {"urllib", "urlparse", "urlsplit", "urlunparse", "parse_qs", "http.client"}
-    for path in Path(payload.__file__).parent.glob("*.py"):
-        if path.name == "gateway.py":
-            continue  # the transport's own URL (the webhook), never the link
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            names: list[str] = []
-            if isinstance(node, ast.Import):
-                names = [alias.name for alias in node.names]
-            elif isinstance(node, ast.ImportFrom):
-                names = [node.module or ""]
-            elif isinstance(node, ast.Attribute | ast.Name):
-                names = [node.attr if isinstance(node, ast.Attribute) else node.id]
-            assert not banned & set(names), (path.name, names)
+    paths = [p for p in Path(payload.__file__).parent.glob("*.py") if p.name != "gateway.py"]
+    assert paths
+    for path in paths:  # gateway.py is exempt: the transport's own URL, never the link
+        assert not url_parser_uses(path.read_text()), path.name
 
 
 # --- through the command line -----------------------------------------------------------------
@@ -262,7 +329,7 @@ def test_a_refused_link_is_exit_20_with_the_reason_and_no_echo_from_json(
     assert error["code"] == "refused" and error["reason"] == reason
     assert error["message"] == payload.LINK_MESSAGES[reason]
     assert CANARY not in out + err
-    assert f"refused ({reason}): " in err or err == ""
+    assert err == f"refused ({reason}): {payload.LINK_MESSAGES[reason]}\n"
 
 
 def test_a_refused_link_from_a_flag_is_the_same(
@@ -297,7 +364,7 @@ def test_no_link_stays_none(fake_gateway: FakeGateway, monkeypatch: pytest.Monke
     assert code == 0 and seen.link is None
 
 
-def test_an_earlier_fault_wins_over_a_bad_link(
+def test_empty_message_precedes_the_link_rule(
     fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     code, out, _, _ = run(["send"], fake_gateway, monkeypatch, b'{"link":"javascript:x"}')

@@ -438,7 +438,7 @@ def check_send_combinations(args: argparse.Namespace) -> None:
     --message). The value flags are not judged here: they are checked like the same JSON field
     when the notification is read (``load_notification``, exit 20 with a pointer).
     """
-    text_flags = any(getattr(args, name) is not None for name in TEXT_FLAGS)
+    text_flags = any(vars(args)[name] is not None for name in TEXT_FLAGS)
     if (args.stdin_json or args.file is not None) and text_flags:
         raise usage_error(
             "a JSON source cannot be combined with --title, --message, --level or --link"
