@@ -33,11 +33,29 @@ def example_values() -> dict[str, Any]:
     return parse_yaml(EXAMPLE.read_bytes())
 
 
+def parse_documented_keys(text: str) -> list[str]:
+    """First column of the Config table in interface.md text (rows like ``| `key` | ...``).
+
+    Fails with a clear message (never a bare IndexError) when the doc has drifted.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    parts = re.split(r"^## Config[ \t]*$", text, maxsplit=1, flags=re.MULTILINE)
+    assert len(parts) == 2, "interface.md has no '## Config' heading"
+    section = re.split(r"^## ", parts[1], maxsplit=1, flags=re.MULTILINE)[0]
+    header = re.search(r"^\s*\|\s*Key\s*\|\s*Default\s*\|", section, flags=re.MULTILINE)
+    assert header, "the Config section has no '| Key | Default |' table header"
+    keys = re.findall(
+        r"^\s*\|\s*`([A-Za-z0-9_]+)`\s*\|", section[header.end() :], flags=re.MULTILINE
+    )
+    assert keys, "the Config table has no rows with a backticked key in the first column"
+    assert len(keys) == len(DEFAULTS), (
+        f"the Config table has {len(keys)} rows but DEFAULTS has {len(DEFAULTS)} keys"
+    )
+    return keys
+
+
 def documented_keys() -> list[str]:
-    """First column of the Config table in interface.md (rows like ``| `key` | ...``)."""
-    text = INTERFACE.read_text(encoding="utf-8")
-    section = text.split("\n## Config\n", 1)[1].split("\n## ", 1)[0]
-    return re.findall(r"^\| `([a-z_]+)` \|", section, flags=re.MULTILINE)
+    return parse_documented_keys(INTERFACE.read_text(encoding="utf-8"))
 
 
 # --- the example through the strict loader, the schema and the validator -----------------------
@@ -46,7 +64,7 @@ def documented_keys() -> list[str]:
 def test_the_example_loads_through_the_strict_loader(fake_gateway: FakeGateway) -> None:
     loaded = load_config(fake_gateway, home=None, config_path=str(EXAMPLE))
     assert loaded == example_values()
-    assert set(loaded) == set(DEFAULTS)
+    assert loaded == DEFAULTS  # a changed value in the example fails here, not only a changed key
 
 
 def test_the_example_validates_against_the_config_schema() -> None:
@@ -81,6 +99,7 @@ def test_every_documented_key_appears_in_the_example_with_a_comment() -> None:
     for key in documented_keys():
         at = [i for i, line in enumerate(lines) if line.startswith(f"{key}:")]
         assert len(at) == 1, key
+        assert at[0] > 0, f"{key} is the first line, so there is no line above it"
         assert lines[at[0] - 1].startswith("#"), f"{key} has no comment line above it"
 
 
@@ -94,36 +113,105 @@ def test_every_schema_property_and_every_level_appears_in_the_example() -> None:
 # --- the example is a template: no secret, no real host -----------------------------------------
 
 URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://|\bwww\.", re.IGNORECASE)
-HOSTNAME = re.compile(
-    r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|dev|app|co|biz|info|edu|gov|us|uk|de|ai)\b",
+# Any dotted name whose last label is alphabetic (2+ letters) is a host, except file names with one
+# of the extensions the example legitimately contains.
+DOTTED = re.compile(r"\b[a-z0-9_-]+(?:\.[a-z0-9_-]+)*\.([a-z]{2,})\b", re.IGNORECASE)
+FILE_EXTENSIONS = frozenset({"yaml", "yml", "json", "jsonl", "md", "py", "toml", "txt", "key"})
+LOCALHOST = re.compile(r"\blocalhost\b", re.IGNORECASE)
+HOST_PORT = re.compile(r"\b[a-z][a-z0-9-]*:\d{2,5}\b", re.IGNORECASE)
+USER_AT_HOST = re.compile(r"\b[\w.+-]+@[\w-]+", re.IGNORECASE)
+TOKEN = re.compile(
+    r"\bxox[a-z]-"
+    r"|(?=[A-Za-z0-9+/_.=-]*[A-Z0-9])[A-Za-z0-9+/_.=-]{32,}"  # needs a capital or digit: not a path
+    r"|\bT[0-9A-Z]{8,}/B[0-9A-Z]{8,}"
+    r"|\b(?i:bearer)\s+\S{8,}"
+)
+IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
+_H = r"[0-9a-f]{1,4}"
+IPV6 = re.compile(
+    rf"\[[0-9a-f:.]*:[0-9a-f:.]*:[0-9a-f:.]*\]"  # bracketed, at least two colons
+    rf"|(?<![\w:])(?:{_H}:){{7}}{_H}(?![\w:])"  # full form
+    rf"|(?<![\w:])(?:{_H}(?::{_H}){{0,6}})?::(?:{_H}(?::{_H}){{0,6}})?(?![\w:])",  # compressed
     re.IGNORECASE,
 )
-TOKEN = re.compile(r"\bxox[a-z]-|\b[A-Za-z0-9+/_-]{32,}\b|\bT[0-9A-Z]{8,}/B[0-9A-Z]{8,}")
-IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
-LEAKS = (URL, HOSTNAME, TOKEN, IPV4)
+PLAIN_PATTERNS = (URL, LOCALHOST, HOST_PORT, USER_AT_HOST, TOKEN, IPV4, IPV6)
 
 
 def leaks(text: str) -> list[str]:
-    return [m.group(0) for pattern in LEAKS for m in pattern.finditer(text)]
+    found = [m.group(0) for pattern in PLAIN_PATTERNS for m in pattern.finditer(text)]
+    found += [
+        m.group(0) for m in DOTTED.finditer(text) if m.group(1).lower() not in FILE_EXTENSIONS
+    ]
+    return found
 
 
 def test_the_example_holds_no_url_hostname_ip_or_token_shaped_text() -> None:
     assert leaks(EXAMPLE.read_text(encoding="utf-8")) == []
 
 
+def _dotted(*labels: str) -> str:
+    return ".".join(labels)
+
+
 @pytest.mark.parametrize(
     "text",
     [
         "webhook_env: " + "/".join(["https:", "", "example.test", "x"]),
-        "# see " + ".".join(["hooks", "slack", "com"]),
+        "# see " + _dotted("hooks", "slack", "com"),
         "token: " + "xox" + "b-1",
         "k: " + "A" * 32,
-        "host: " + ".".join(["10", "0", "0", "1"]),
-        "# " + ".".join(["www", "example"]),
+        "host: " + _dotted("10", "0", "0", "1"),
+        "# " + _dotted("www", "example"),
+        # hostnames outside any fixed TLD list
+        "# " + _dotted("db", "internal"),
+        "# " + _dotted("box", "local"),
+        "# " + _dotted("box", "lan"),
+        "# " + _dotted("a", "corp"),
+        "# " + _dotted("a", "xyz"),
+        "# " + _dotted("a", "test"),
+        "# " + _dotted("a", "invalid"),
+        "# " + _dotted("a", "cloud"),
+        "# " + _dotted("a", "tech"),
+        "# " + _dotted("a", "me"),
+        "# " + _dotted("a", "sh"),
+        "# " + _dotted("a", "fr"),
+        "# " + _dotted("a", "ru"),
+        "# " + _dotted("a", "ch"),
+        "# " + "local" + "host",
+        "# " + "local" + "host" + ":" + "8080",
+        "# " + "ops" + "@" + "box",
+        "# " + "db" + ":" + "5432",
+        # token alphabet with '.' and '=' and bearer credentials
+        "CANARY: " + ".".join(["a" * 12, "b" * 12, "c" * 12]),
+        "CANARY: " + "q" * 29 + "9==",
+        "CANARY: " + "Bear" + "er " + "z" * 20,
+        "CANARY: " + "bear" + "er " + "z" * 20,
+        # IPv6
+        "# [" + "::1" + "]",
+        "# [" + "2001:db8::1" + "]:443",
+        "# " + "2001:db8" + "::1",
+        "# " + "fe80" + "::1",
+        "# " + "::" + "1",
+        "# " + ":".join(["2001", "db8", "0", "0", "0", "0", "0", "1"]),
     ],
 )
 def test_the_leak_scan_catches_what_it_is_for(text: str) -> None:
     assert leaks(text) != []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "# .config/slack-notice/config.yaml, details.key, config.d/*.yaml, log.jsonl",
+        "# schemas/config.json",
+        "timeout: 10s  # 1:30 and 12:34 are not addresses",
+        "# version 0.6.0 and 1.5 seconds",
+        "# a short Bearer word",
+        "level: 10",
+    ],
+)
+def test_the_leak_scan_leaves_ordinary_text_alone(text: str) -> None:
+    assert leaks(text) == []
 
 
 def test_the_credential_is_named_by_variable_never_given() -> None:
@@ -132,11 +220,58 @@ def test_the_credential_is_named_by_variable_never_given() -> None:
     assert values["webhook_env"] == DEFAULTS["webhook_env"]
 
 
+# --- the doc parser fails loudly on drift --------------------------------------------------
+
+
+def _doc() -> str:
+    return INTERFACE.read_text(encoding="utf-8")
+
+
+def test_the_doc_parser_accepts_the_real_doc_with_crlf_line_endings() -> None:
+    assert parse_documented_keys(_doc().replace("\n", "\r\n")) == list(DEFAULTS)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda t: t.replace("\n## Config\n", "\n## Settings\n"),
+        lambda t: re.sub(r"^\| Key \|.*\n\|---\|.*\n", "", t, flags=re.MULTILINE),
+        lambda t: t.replace("| `enabled` |", "| enabled |"),
+        lambda t: re.sub(r"^\| (`\w+`) \| (`[^|]*`) \|", r"| \2 | \1 |", t, flags=re.MULTILINE),
+        lambda t: t.replace("| `log` |", "| `log2` |", 1).replace("| `log2` |", "| x |"),
+        lambda t: t.replace("| `enabled` |", "| `enabled` | `true` | x |\n| `extra` |", 1),
+    ],
+    ids=["renamed-heading", "no-table", "no-backticks", "swapped-columns", "row-lost", "row-added"],
+)
+def test_the_doc_parser_raises_on_a_drifted_doc(mutate: Any) -> None:
+    mutated = mutate(_doc())
+    assert mutated != _doc()
+    with pytest.raises(AssertionError):
+        parse_documented_keys(mutated)
+
+
 # --- the negative side: the checks above can fail ------------------------------------------------
 
 
-def test_a_broken_copy_of_the_example_fails_each_check() -> None:
-    bad = {**example_values(), "timeout": 0}
+@pytest.mark.parametrize(
+    "breakage",
+    [
+        {"unknown_key": 1},
+        {"enabled": "yes"},
+        {"webhook_env": 5},
+        {"body_variable": ""},
+        {"level_prefix": {"info": "x" * 17}},
+        {"level_prefix": {"info": 5}},
+        {"max_chars": 1999},
+        {"max_chars": 12001},
+        {"timeout": 0},
+        {"timeout": "5x"},
+        {"log": "no"},
+    ],
+    ids=lambda b: next(iter(b)) + "=" + repr(next(iter(b.values())))[:20],
+)
+def test_a_broken_copy_of_the_example_fails_each_check(breakage: dict[str, Any]) -> None:
+    bad = {**example_values(), **breakage}
     assert schema_errors("config", bad)
     with pytest.raises(ConfigInvalid):
         validate_config(bad)
