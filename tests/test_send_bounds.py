@@ -150,24 +150,37 @@ def test_a_result_still_printing_on_a_blocked_stderr_stops_every_later_stderr_wr
 # --- R2: the result print is committed before conclude -----------------------------------------
 
 
-def test_a_signal_when_the_print_thread_starts_never_gives_exit_20_with_an_empty_output(
+def test_a_signal_while_the_print_thread_runs_never_gives_exit_20_with_an_empty_output(
     fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    real = threading.Thread.start
+    """The signal lands once the print thread runs (before its first write) while the main thread
+    waits in the join. Only the commit in ``_conclude`` makes the armed gate ignore it; without
+    it the handler records the signal and the print is cut short."""
+    real = cli.Output.result_printed
+    delivered: list[bool] = []
 
-    def start(self: threading.Thread) -> None:
-        if self.name == "slack-notice-print":
+    def printed(self: cli.Output) -> None:
+        if threading.current_thread().name == "slack-notice-print" and not delivered:
+            delivered.append(True)
             os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(0.02)  # inside the 0.05 print bound; the main thread's join runs the handler
         real(self)
 
-    monkeypatch.setattr(threading.Thread, "start", start)
+    monkeypatch.setattr(cli.Output, "result_printed", printed)
     sent = go([*SEND], fake_gateway, stdin=stdin_json(title=CANARY))
-    if sent.code == 128 + signal.SIGTERM:
-        assert (sent.out, sent.err) == (b"", b"")
-    else:
-        assert sent.code == 20
-        assert sent.error["code"] == "refused" or sent.error["code"]
-        assert sent.out != b""
+    assert delivered == [True]
+    assert sent.code == 20
+    assert sent.out != b"", "exit 20 with an empty output"
+    assert sent.error == {
+        "code": "refused",
+        "reason": "empty_message",
+        "message": sent.error["message"],
+        "retryable": None,
+        "unknown_outcome": None,
+        "details": None,
+        "retry_after_s": None,
+    }, sent.out
+    assert sent.stdout.endswith("\n") and sent.stdout.count("\n") == 1
 
 
 # --- R3: a possible write is never lost -------------------------------------------------------
