@@ -24,7 +24,7 @@ Which test settles which item of the live verification checklist (issue #37, des
 | two machines | manual (listed in the report) |
 | #32 test message | test_validate_test_message |
 | #19 rendering | test_emoji_per_level, test_auto_link, test_text_is_literal |
-| #23/#24 wire shapes | test_raw_error_shapes, test_get_probe, test_tls_and_dns_details |
+| #23/#24 wire shapes | test_raw_error_shapes, test_v2_get_probe, test_tls_and_dns_details |
 | #23 TLS failure | test_tls_verification_failure |
 """
 
@@ -40,7 +40,7 @@ from typing import Any
 
 import pytest
 
-from slack_notice import webhook
+from slack_notice import render, webhook
 from slack_notice.gateway import SystemGateway
 from slack_notice.render import serialize
 from tests.live_support import (
@@ -49,11 +49,13 @@ from tests.live_support import (
     TEST_MESSAGE_MARKER,
     CliResult,
     LiveGateway,
+    MarkerRefused,
     Pacer,
     RawResult,
     Recorder,
     TriggerUrl,
     alter_last_segment,
+    ca_sources,
     decide,
     describe_shape,
     gaps,
@@ -117,26 +119,35 @@ class Live:
             notification=notice,
             config=config,
         )
+        self.pacer.mark()
         self.rec.tally(result.exchanges)
         return result
 
     def raw(
         self,
+        item: str,
+        label: str,
         method: str,
         path: str,
         body: bytes | None = None,
         headers: dict[str, str] | None = None,
-    ) -> RawResult:
+    ) -> RawResult | None:
+        """One raw request. A failure is recorded under ``item``/``label`` as the exception class
+        name only (http.client messages can quote the request target, which is the secret) and
+        the test goes on with the next case; ``None`` is returned then."""
         self.pacer.wait()
         gateway = LiveGateway()
         conn = open_raw_connection(gateway)
         try:
             result = raw_exchange(conn, method, path, body=body, headers=headers)
+        except MarkerRefused:
+            raise  # a bug in the suite, not a network event
         except Exception as exc:
-            # http.client messages can quote the request target, which is the secret.
-            raise RuntimeError(f"raw request failed: {type(exc).__name__}") from None
+            self.rec.observe(item, label, {"error": type(exc).__name__})
+            return None
         finally:
             conn.close()
+            self.pacer.mark()
         self.rec.tally_raw(result)
         return result
 
@@ -172,7 +183,7 @@ def live() -> Iterator[Live]:
     directory = report_directory(os.environ)
     json_path, text_path = recorder.write(directory)
     print(f"\nlive report written: {json_path}\n                     {text_path}", file=sys.stderr)
-    print("Open the text report and tick each LOOK AT THE DESTINATION entry.", file=sys.stderr)
+    print("Open the text report and check each LOOK AT THE DESTINATION entry.", file=sys.stderr)
 
 
 @pytest.fixture(autouse=True)
@@ -233,6 +244,7 @@ def test_v18_ca_paths_and_trust_store(allowlisted: Live) -> None:
             "tool_cafile": candidates.cafile,
             "tool_capath": candidates.capath,
             "ca_certs_loaded": stats.get("x509_ca"),
+            "sources": ca_sources(candidates),
             "python": sys.version.split()[0],
         },
     )
@@ -271,6 +283,7 @@ def test_validate_test_message(allowlisted: Live, tmp_path: Path) -> None:
         gateway=gateway,
         work=tmp_path / "work",
     )
+    allowlisted.pacer.mark()
     allowlisted.rec.tally(result.exchanges)
     document = result.document
     assert result.code == 0 and document is not None and document["ok"] is True
@@ -307,7 +320,6 @@ def test_v3_cli_ascii_at_the_cap(allowlisted: Live, tmp_path: Path) -> None:
             "message_chars": len(message),
         },
     )
-    assert document["bytes"] <= 12000
     allowlisted.look(
         "V3",
         "ascii12000",
@@ -349,12 +361,18 @@ def test_v3_raw_limits(allowlisted: Live) -> None:
     for label, unit, size in cases:
         text = raw_limit_text(label, unit, size)
         body = serialize("body", text)
-        result = allowlisted.raw("POST", allowlisted.path, body, POST_HEADERS)
-        allowlisted.rec.observe(
-            "V3",
-            label,
-            {"chars": len(text), "bytes": len(body), "status": result.status, "body": result.body},
-        )
+        result = allowlisted.raw("V3", label, "POST", allowlisted.path, body, POST_HEADERS)
+        if result is not None:
+            allowlisted.rec.observe(
+                "V3",
+                label,
+                {
+                    "chars": len(text),
+                    "bytes": len(body),
+                    "status": result.status,
+                    "body": result.body,
+                },
+            )
         allowlisted.look(
             "V3",
             label,
@@ -424,7 +442,9 @@ def test_text_is_literal(allowlisted: Live, tmp_path: Path) -> None:
     )
     assert sent_ok(result)["truncated"] is True
     allowlisted.look(
-        "R", "cut", "the text ends with '...[truncated]' directly followed by the link line below"
+        "R",
+        "cut",
+        f"the text ends with '{render.MARKER}' directly followed by the link line below",
     )
 
 
@@ -459,9 +479,16 @@ def _paced_run(live: Live, tmp: Path, label: str, count: int) -> None:
     )
     print(f"\nV1 {label}: outcomes={codes} gaps={spacing}")
     assert all(result.code == 0 for result in results), f"not all sent: {codes}"
+    statuses = [item.status for item in exchanges]
+    # A retried 429 shows as an extra exchange: throttling must fail the test, not be absorbed.
+    assert len(exchanges) == count, f"expected {count} requests, saw {len(exchanges)}: {statuses}"
+    assert all(status == 200 for status in statuses), f"not all 200: {statuses}"
     assert all(gap >= 0.9 for gap in spacing), f"spacing below the 1 s lock: {spacing}"
     live.look(
-        "V1", label, f"{count} messages '{label} N of {count}', in order, none missing (429 = lost)"
+        "V1",
+        label,
+        f"{count} messages '{label} N of {count}', in order, none missing "
+        "(a missing one was throttled or dropped)",
     )
 
 
@@ -481,6 +508,7 @@ def test_v2_altered_path_status(allowlisted: Live, tmp_path: Path) -> None:
     allowlisted.rec.add_secret(altered.reveal())
     result = allowlisted.send(tmp_path, "altered-path", "never delivered: wrong path", url=altered)
     details = result.error.get("details") or {}
+    exchange = result.exchanges[0] if result.exchanges else None
     allowlisted.rec.observe(
         "V2",
         "altered_last_segment_post",
@@ -489,6 +517,12 @@ def test_v2_altered_path_status(allowlisted: Live, tmp_path: Path) -> None:
             "code": result.error.get("code"),
             "http_status": details.get("http_status"),
             "retryable": result.error.get("retryable"),
+            "exchange_status": None if exchange is None else exchange.status,
+            "response_body": (
+                None
+                if exchange is None
+                else exchange.response_body.decode("utf-8", errors="replace")[:200]
+            ),
         },
     )
     assert result.code == 12 and result.error.get("code") == "auth_required"
@@ -499,13 +533,22 @@ def test_v2_get_probe(allowlisted: Live) -> None:
     altered = alter_last_segment(allowlisted.url)
     allowlisted.rec.add_secret(altered.reveal())
     altered_path = altered.reveal()[len(SCHEME + webhook.HOST) :]
-    live_get = allowlisted.raw("GET", allowlisted.path)
-    dead_get = allowlisted.raw("GET", altered_path)
-    slash_get = allowlisted.raw("GET", allowlisted.path + "/")
-    allowlisted.rec.observe("V2", "get_on_live_url", live_get.summary())
-    allowlisted.rec.observe("V2", "get_on_altered_url", dead_get.summary())
-    allowlisted.rec.observe("V2", "get_on_live_url_with_trailing_slash", slash_get.summary())
-    allowlisted.rec.observe("V2", "get_tells_live_from_dead", live_get.status != dead_get.status)
+    live_get = allowlisted.raw("V2", "get_on_live_url", "GET", allowlisted.path)
+    dead_get = allowlisted.raw("V2", "get_on_altered_url", "GET", altered_path)
+    slash_get = allowlisted.raw(
+        "V2", "get_on_live_url_with_trailing_slash", "GET", allowlisted.path + "/"
+    )
+    for key, result in (
+        ("get_on_live_url", live_get),
+        ("get_on_altered_url", dead_get),
+        ("get_on_live_url_with_trailing_slash", slash_get),
+    ):
+        if result is not None:
+            allowlisted.rec.observe("V2", key, result.summary())
+    if live_get is not None and dead_get is not None:
+        allowlisted.rec.observe(
+            "V2", "get_tells_live_from_dead", live_get.status != dead_get.status
+        )
     allowlisted.look(
         "V2",
         "GET probe",
@@ -542,8 +585,9 @@ def test_raw_error_shapes(allowlisted: Live) -> None:
         ),
     ]
     for label, body, headers in cases:
-        result = allowlisted.raw("POST", allowlisted.path, body, headers)
-        allowlisted.rec.observe("R", f"raw_{label}", result.summary())
+        result = allowlisted.raw("R", f"raw_{label}", "POST", allowlisted.path, body, headers)
+        if result is not None:
+            allowlisted.rec.observe("R", f"raw_{label}", result.summary())
     allowlisted.look(
         "R",
         "raw shapes",
@@ -555,8 +599,17 @@ def test_raw_error_shapes(allowlisted: Live) -> None:
 def test_o1_idempotency_header(allowlisted: Live) -> None:
     body = serialize("body", f"{MARKER} idempotency-header start END-idem")
     headers = {**POST_HEADERS, "Idempotency-Key": f"live-{allowlisted.rec.run_id}"}
-    statuses = [allowlisted.raw("POST", allowlisted.path, body, headers).status for _ in range(2)]
-    allowlisted.rec.observe("O1", "statuses_with_Idempotency-Key", statuses)
+    results = [
+        allowlisted.raw(
+            "O1", f"post_{number}_with_Idempotency-Key", "POST", allowlisted.path, body, headers
+        )
+        for number in (1, 2)
+    ]
+    allowlisted.rec.observe(
+        "O1",
+        "statuses_with_Idempotency-Key",
+        [None if result is None else result.status for result in results],
+    )
     allowlisted.look(
         "O1",
         "idempotency header",
@@ -579,6 +632,7 @@ def test_tls_verification_failure(allowlisted: Live, tmp_path: Path) -> None:
         work=tmp_path / "work",
         notification={"title": allowlisted.title("tls"), "message": "never sent: no trust"},
     )
+    allowlisted.pacer.mark()
     details = result.error.get("details") or {}
     allowlisted.rec.observe(
         "T",

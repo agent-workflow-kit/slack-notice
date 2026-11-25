@@ -7,6 +7,7 @@ the one nested pytest run only collects. URL values are built from parts at run 
 from __future__ import annotations
 
 import http.client
+import importlib
 import json
 import os
 import pickle
@@ -23,7 +24,7 @@ import pytest
 from slack_notice import webhook
 from slack_notice.render import serialize
 from tests import live_support as ls
-from tests.fake_gateway import FakeGateway
+from tests.fake_gateway import Attempt, FakeGateway, Reply
 from tests.send_harness import go, stdin_json, write_config
 from tests.test_send import OK
 
@@ -55,7 +56,20 @@ def test_opt_in_naming_a_set_variable_runs() -> None:
     assert (decision.action, decision.url_env) == ("run", "MY_URL")
 
 
-@pytest.mark.parametrize("name", ["CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "CI",
+        "GITHUB_ACTIONS",
+        "GITLAB_CI",
+        "BUILDKITE",
+        "TRAVIS",
+        "TEAMCITY_VERSION",
+        "CODEBUILD_BUILD_ID",
+        "DRONE",
+        "BITBUCKET_BUILD_NUMBER",
+    ],
+)
 def test_ci_always_refuses_even_with_a_valid_opt_in(name: str) -> None:
     env = {ls.OPT_IN_VAR: "MY_URL", "MY_URL": fake_url(), name: "true"}
     assert ls.decide(env).action == "refuse"
@@ -258,6 +272,23 @@ def test_pacer_sleeps_only_the_missing_part() -> None:
     assert len(slept) == 1
 
 
+def test_pacer_mark_makes_the_next_wait_count_from_the_end_of_an_action() -> None:
+    now = [0.0]
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    pacer = ls.Pacer(1.5, clock=lambda: now[0], sleep=sleep)
+    pacer.wait()  # a series starts at t=0 ...
+    now[0] += 4.0  # ... and its last send ends at t=4
+    pacer.mark()
+    now[0] += 0.5
+    pacer.wait()
+    assert slept == [pytest.approx(1.0)]
+
+
 def test_gaps_are_the_differences_between_request_starts() -> None:
     items = [ls.Exchange(t, 1, b"") for t in (1.0, 2.1, 4.35)]
     assert ls.gaps(items) == [1.1, 2.25]
@@ -301,16 +332,66 @@ def test_the_report_counts_5xx_and_latency_from_tallies() -> None:
     }
 
 
-def test_the_report_refuses_to_hold_url_material() -> None:
+def test_the_report_redacts_url_material_and_is_still_produced() -> None:
     rec = ls.Recorder()
-    url = fake_url()
-    rec.add_secret(url)
+    rec.add_secret(fake_url())
     rec.observe("V2", "bad", "leaked " + SEGMENT_A)  # a long path segment
-    with pytest.raises(ValueError, match="trigger URL material") as caught:
-        rec.to_json()
-    assert SEGMENT_A not in str(caught.value)
-    with pytest.raises(ValueError, match="trigger URL material"):
-        rec.to_text()
+    rec.observe("V2", "whole", fake_url())
+    for text in (rec.to_json(), rec.to_text()):
+        assert SEGMENT_A not in text and SEGMENT_B not in text and ls.SCHEME + HOST not in text
+        assert "<trigger url redacted>" in text
+    assert rec.redactions >= 4
+    assert json.loads(rec.to_json())["items"]["V2"]["observed"]["bad"].startswith("leaked ")
+
+
+@pytest.mark.parametrize("word", [HOST, "triggers", "/triggers/", "slack.com"])
+def test_fixed_prefix_words_in_a_report_are_not_secrets(word: str) -> None:
+    rec = ls.Recorder()
+    rec.add_secret(fake_url())
+    rec.observe("V2", "x", f"{word} and hooks.slack.com seen")
+    text = rec.to_text()
+    assert word in text and rec.redactions == 0
+    assert "hooks.slack.com" in rec.to_json()
+
+
+def test_only_the_segments_after_the_trigger_prefix_are_registered() -> None:
+    rec = ls.Recorder()
+    rec.add_secret(fake_url())
+    assert set(rec._secrets) == {fake_url(), SEGMENT_A, SEGMENT_B}
+    rec.add_secret(ls.SCHEME + HOST + "/triggers/" + "short7x/" + SEGMENT_A + "?q=" + SEGMENT_B)
+    assert "short7x" not in rec._secrets and HOST not in rec._secrets
+
+
+def test_ca_sources_reports_the_loaded_counts_and_the_used_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Context:
+        def __init__(self, count: int) -> None:
+            self.count = count
+
+        def cert_store_stats(self) -> dict[str, int]:
+            return {"x509_ca": self.count}
+
+    def build(candidates: Any) -> Context:
+        if candidates.cafile:
+            return Context(7)
+        if candidates.fallback_files:
+            return Context(3)
+        raise ls.NoUsableCA
+
+    monkeypatch.setattr(ls, "build_tls_context", build)
+    both = ls.ca_sources(ls.CaCandidates("/a", "/b", ("/c",)))
+    assert both == {
+        "loaded_ca_certs": {"cafile": 7, "capath": None, "fallback": 3},
+        "used": ["cafile"],
+    }
+    only_fallback = ls.ca_sources(ls.CaCandidates(None, None, ("/c",)))
+    assert only_fallback["used"] == ["fallback"]
+    nothing = ls.ca_sources(ls.CaCandidates(None, None, ()))
+    assert nothing == {
+        "loaded_ca_certs": {"cafile": None, "capath": None, "fallback": None},
+        "used": ["none"],
+    }
 
 
 def test_unknown_item_is_a_key_error() -> None:
@@ -419,6 +500,18 @@ def test_a_validate_test_message_without_the_extra_marker_posts_nothing(
     assert result.code != 0 and gateway.exchanges == []
 
 
+@pytest.mark.parametrize("code", [130, 143])
+def test_an_interrupt_exit_code_stops_the_run(
+    code: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(*_args: Any, **_kwargs: Any) -> int:
+        raise ls.LiveExit(code)
+
+    monkeypatch.setattr(ls, "main", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        ls.run_cli(["send"], url=trigger(), gateway=ls.LiveGateway(), work=tmp_path / "w")
+
+
 def test_exit_now_raises_instead_of_ending_the_process() -> None:
     gateway = ls.LiveGateway()
     with pytest.raises(ls.LiveExit) as caught:
@@ -439,6 +532,10 @@ class StubResponse:
 
     def __init__(self, headers: dict[str, str], body: bytes) -> None:
         self._headers, self._body = headers, body
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return self._headers
 
     def getheader(self, name: str) -> str | None:
         return self._headers.get(name)
@@ -475,6 +572,18 @@ def test_raw_exchange_keeps_whitelisted_headers_and_hides_the_location() -> None
     assert secret_location not in json.dumps(result.summary())
     method, _path, body, headers = conn.requests[0]
     assert (method, body, headers["Connection"]) == ("GET", None, "close")
+
+
+def test_raw_exchange_records_header_count_and_head_size_not_values() -> None:
+    response = StubResponse({"content-type": "text/plain", "x-secret-ish": "v" * 30}, b"")
+    result = ls.raw_exchange(StubConnection(response), "GET", "/p")
+    summary = result.summary()
+    assert summary["header_count"] == 2
+    assert (
+        summary["header_bytes"]
+        == len("content-type") + len("text/plain") + 4 + len("x-secret-ish") + 30 + 4
+    )
+    assert "tls_version" not in summary and not hasattr(result, "tls_version")
 
 
 def test_raw_exchange_refuses_a_get_body_and_an_unmarked_post() -> None:
@@ -620,6 +729,22 @@ def test_the_live_target_requires_the_opt_in_variable() -> None:
     assert ls.OPT_IN_VAR in recipe.group(1) and "-m live" in recipe.group(1)
 
 
+def test_the_live_target_stops_at_the_first_failure_and_keeps_locals_out_of_tracebacks() -> None:
+    recipe = re.search(r"^live:[^\n]*\n((?:\t[^\n]*\n)+)", (ROOT / "Makefile").read_text(), re.M)
+    assert recipe is not None
+    run = [line for line in recipe.group(1).splitlines() if "pytest" in line][0]
+    assert " -x" in run and "--tb=short" in run
+    assert not re.search(r"\s-l\b|--showlocals", run)
+
+
+def test_the_docstring_table_names_only_existing_live_tests() -> None:
+    source = (ROOT / "tests" / "test_live.py").read_text(encoding="utf-8")
+    header = source.split('"""', 2)[1]
+    defined = set(re.findall(r"^def (test_\w+)", source, re.M))
+    named = set(re.findall(r"\btest_\w+", header))
+    assert named and named <= defined, sorted(named - defined)
+
+
 @pytest.mark.parametrize("name", ["live_support.py", "test_live.py", "test_live_support.py"])
 def test_the_live_files_hold_no_url_literal_and_no_real_looking_secret(name: str) -> None:
     text = (ROOT / "tests" / name).read_text(encoding="utf-8")
@@ -641,3 +766,142 @@ def test_the_live_tests_read_only_their_own_variables() -> None:
         "decision.url_env",
         '"HOME"',
     ]
+
+
+# --- the live test bodies, run offline against a fake gateway and stub connections -----------
+
+tl = importlib.import_module("tests.test_live")
+
+
+class ClockedGateway(ls.LiveGateway):
+    """The live gateway wrapper on the fake gateway's connection and (instant) clock."""
+
+    def __init__(self, fake: FakeGateway, **kwargs: Any) -> None:
+        super().__init__(connect=fake.https_connection, tls=untrusting_free_context, **kwargs)
+        self._fake = fake
+
+    def monotonic(self) -> float:
+        return self._fake.monotonic()
+
+    def wall_time(self) -> float:
+        return self._fake.wall_time()
+
+    def sleep(self, seconds: float) -> None:
+        self._fake.sleep(seconds)
+
+
+@pytest.fixture
+def session(fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch) -> Any:
+    rec = ls.Recorder()
+    url = trigger()
+    rec.add_secret(url.reveal())
+    live = tl.Live(url, rec)
+    live.pacer = ls.Pacer(1.5, clock=fake_gateway.monotonic, sleep=fake_gateway.sleep)
+    live.created = []  # type: ignore[attr-defined]
+
+    def factory(**kwargs: Any) -> ClockedGateway:
+        gateway = ClockedGateway(fake_gateway, **kwargs)
+        live.created.append(gateway)  # type: ignore[attr-defined]
+        return gateway
+
+    monkeypatch.setattr(tl, "LiveGateway", factory)
+    return live
+
+
+def all_starts(live: Any) -> list[float]:
+    return [e.started for gateway in live.created for e in gateway.exchanges]
+
+
+def test_v1_series_are_spaced_at_least_the_pacer_gap_apart(
+    session: Any, fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    fake_gateway.script(*[OK] * 12)
+    tl.test_v1_burst_at_the_lock_spacing(session, tmp_path)
+    tl.test_v1_sustained_at_the_lock_spacing(session, tmp_path)
+    starts = all_starts(session)
+    assert len(starts) == 12
+    between = ls.gaps([ls.Exchange(t, 1, b"") for t in starts])
+    assert between[3] >= 1.5 - 1e-6  # the gap between the two series
+    assert all(gap >= 0.9 for gap in between)
+
+
+def test_v1_fails_when_a_send_was_throttled_and_retried(
+    session: Any, fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    fake_gateway.script(Attempt(reply=Reply(status=429, body=b"{}")), *[OK] * 4)
+    with pytest.raises(AssertionError, match="expected 4 requests"):
+        tl.test_v1_burst_at_the_lock_spacing(session, tmp_path)
+
+
+def test_v2_altered_path_records_status_and_body_of_the_exchange(
+    session: Any, fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    fake_gateway.script(Attempt(reply=Reply(status=404, body=b'{"error":"gone"}')))
+    tl.test_v2_altered_path_status(session, tmp_path)
+    seen = session.rec.observations["V2"]["altered_last_segment_post"]
+    assert seen["exchange_status"] == 404 and seen["response_body"] == '{"error":"gone"}'
+    assert seen["code"] == "auth_required"
+
+
+class ExplodingConnection:
+    """A raw connection whose request fails with a message that quotes the request path."""
+
+    sock = None
+
+    def request(self, method: str, path: str, **_kwargs: Any) -> None:
+        raise OSError(f"broken while sending {method} {path}")
+
+    def close(self) -> None:
+        pass
+
+
+class OkConnection(StubConnection):
+    def close(self) -> None:
+        pass
+
+
+def test_a_failed_raw_request_is_recorded_by_class_and_the_test_goes_on(
+    session: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    made: list[Any] = []
+
+    def open_connection(_gateway: Any, timeout: float = 15.0) -> Any:
+        made.append(1)
+        return ExplodingConnection() if len(made) == 1 else OkConnection(StubResponse({}, b"{}"))
+
+    monkeypatch.setattr(tl, "open_raw_connection", open_connection)
+    tl.test_v3_raw_limits(session)
+    observed = session.rec.observations["V3"]
+    assert len(made) == 5 and observed["raw-ascii-12001"] == {"error": "OSError"}
+    assert observed["raw-ascii-12500"]["status"] == 200
+    assert session.rec.statuses == {200: 4}
+    text = session.rec.to_text() + session.rec.to_json()
+    assert SEGMENT_A not in text and "broken while sending" not in text
+
+
+def test_every_raw_case_survives_a_failing_connection(
+    session: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tl, "open_raw_connection", lambda *_a, **_k: ExplodingConnection())
+    tl.test_v2_get_probe(session)
+    tl.test_raw_error_shapes(session)
+    tl.test_o1_idempotency_header(session)
+    observed = session.rec.observations
+    assert observed["V2"]["get_on_live_url"] == {"error": "OSError"}
+    assert "get_tells_live_from_dead" not in observed["V2"]
+    assert len([k for k in observed["R"] if k.startswith("raw_")]) == 5
+    assert observed["O1"]["post_2_with_Idempotency-Key"] == {"error": "OSError"}
+    assert SEGMENT_A not in session.rec.to_text()
+
+
+def test_raw_pacing_marks_the_end_of_a_raw_request(
+    session: Any, fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        tl, "open_raw_connection", lambda *_a, **_k: OkConnection(StubResponse({}, b"{}"))
+    )
+    session.raw("V3", "a", "GET", session.path)
+    fake_gateway.sleep(0.2)
+    before = fake_gateway.monotonic()
+    session.raw("V3", "b", "GET", session.path)
+    assert fake_gateway.monotonic() - before == pytest.approx(1.3, abs=0.05)

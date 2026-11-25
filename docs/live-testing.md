@@ -5,18 +5,20 @@ The live suite posts marked test messages to your own Slack workflow and records
 ## Prerequisites
 
 - A workflow with a webhook trigger and one text variable named `body`, whose message step shows that variable (see the README). Use a workflow whose destination is you: about 40 messages arrive.
-- The trigger URL in an environment variable of your choice, for example `export SLACK_WEBHOOK=...` (never on a command line that is logged).
+- The trigger URL in a dedicated environment variable, for example `export SLACK_NOTICE_LIVE_WEBHOOK=...` (never on a command line that is logged). Never reuse a production variable such as `SLACK_WEBHOOK`: the suite posts about 34 marked messages plus the failed-run notices below, so point it at a workflow of your own, not one other people read.
 - A checkout with the dev environment (`uv sync`).
 
 ## Run
 
 ```sh
-export SLACK_NOTICE_LIVE_URL_ENV=SLACK_WEBHOOK
+export SLACK_NOTICE_LIVE_URL_ENV=SLACK_NOTICE_LIVE_WEBHOOK
 export SLACK_NOTICE_LIVE_REPORT="$HOME/slack-notice-live-report"
 make live
 ```
 
-`SLACK_NOTICE_LIVE_URL_ENV` holds the NAME of the variable that holds the URL, never the URL itself (a value that is not a variable name is refused). The tool under test still reads the URL only from its configured credential variable; the suite hands it the value under `SLACK_WEBHOOK` inside the test process. `SLACK_NOTICE_LIVE_REPORT` is optional: without it the report goes to a new private temporary directory whose path is printed at the end. `make live` is `pytest -m live tests/test_live.py -s -v`; without the opt-in variable every live test is skipped.
+`SLACK_NOTICE_LIVE_URL_ENV` holds the NAME of the variable that holds the URL, never the URL itself (a value that is not a variable name is refused). The tool under test still reads the URL only from its configured credential variable; the suite hands it the value under `SLACK_WEBHOOK` inside the test process. `SLACK_NOTICE_LIVE_REPORT` is optional: without it the report goes to a new private temporary directory whose path is printed at the end. `make live` is `pytest -m live tests/test_live.py -s -v -x --tb=short`: `-x` stops the whole run at the first failure or Ctrl-C, and `--tb=short` keeps tracebacks free of local variables. Never add `-l`/`--showlocals` or set `PYTEST_ADDOPTS` with it: `http.client` locals hold the secret request path and cannot be redacted.
+
+ Without the opt-in variable every live test is skipped.
 
 The run takes about two minutes. It posts at most one request per 1.5 seconds across the suite, and its burst and sustained tests use the tool's own 1 second send spacing: nothing is looped to stress Slack.
 
@@ -45,21 +47,26 @@ Every message contains the fixed marker `slack-notice live test` (the suite's ga
 | `test_tls_verification_failure` | none | the tool's answer when the certificate cannot be verified (no request is written) |
 | `test_tls_and_dns_details` | none | number of addresses, TLS version and cipher, certificate name count |
 
-A `GET` or a wrong variable name may make Slack post a workflow failure notice to the workflow owner; note it if it happens.
+Slack may post a workflow failure notice to the workflow owner, or deliver an unmarked or empty message, for any of the malformed requests: the three `GET`s of `test_v2_get_probe`, and the five raw shapes of `test_raw_error_shapes` (invalid JSON, an object value, a wrong variable name, `text/plain`, no User-Agent). Note each one that happens.
 
 ## Record the results
 
-The run writes `report.json` and `report.txt` (mode 0600) to the report directory. They list every item with its observed values or `observe manually`, and for each message that only your eyes can check a `LOOK AT THE DESTINATION` entry with what to expect. Slack accepts a request and drops it silently in several cases, so exit 0 and status 200 prove only acceptance: open the destination and tick each entry in `report.txt`. The report holds counts, statuses, sizes and character classes only; it is refused (not written) if it would contain the URL or a long path segment.
+The run writes `report.json` and `report.txt` (mode 0600) to the report directory. They list every item with its observed values or `observe manually`, and for each message that only your eyes can check a `LOOK AT THE DESTINATION` entry with what to expect. Slack accepts a request and drops it silently in several cases, so exit 0 and status 200 prove only acceptance: open the destination and check each entry in `report.txt`. The report holds counts, statuses, sizes and character classes only; any trigger URL material that would reach it is replaced by fixed text (the report is still written, so a full run is never lost).
 
-Then record the results:
+Then record the results. Post ONE results comment on the live verification checklist issue (#37) per run and per platform, stating the platform (the suite must be run on each platform that matters: V18 compiled CA paths, the TLS error classes and the CA path source differ by platform), and refer to the #37 bullets by name:
 
 - V4: copy the segment count and the character classes into the V4 row of [design.md](design.md#live-verification). If the URL does not match the allowlist, the grammar in [interface.md](interface.md#webhook-edge) needs a spec change first; do not widen the pattern on a guess.
-- V1, V2, V3, V5, V18, V21 and the open items: tick the boxes in the live verification checklist issue with the date and the result, and update design.md and interface.md before any default is relaxed.
+- V1, V2, V3, V5, V18, V21 and the open items: answer each #37 bullet in that comment with the date and the result, and update design.md and interface.md before any default is relaxed.
+- V2 observes only the alteration of the last path segment (the status and scrubbed body of that one post). That Slack answers 403, 404 or 410 for the other wrong-URL cases is assumed from [interface.md](interface.md), not observed here.
+- V18 records the compiled CA paths, how many certificates each of the tool's sources (compiled file, compiled directory, fallback bundles) loads, and which of them the tool itself uses. It makes no network request.
+- V1 asserts that each series made exactly one request per message and every status is 200; a retried 429 therefore fails the test. The suite waits 1.5 seconds between any two requests, including between series.
 - The first live assertion (V4) is a release criterion: 0.1.0 is not tagged until it passes.
 
 ## Not covered
 
 Not reproducible without harming the workflow or needing a second machine, so listed in the report as manual: a revoked trigger (revoke it in Slack and run `slack-notice validate --test-message`), a 5xx after processing, a 429 with `Retry-After`, a redirect, a reset after the request was written, and two machines sending to one workflow (run the suite from both at once and count 429 results and arrivals). A deliberate rate probe above the tool's 1 second spacing is left out on purpose: it would be a stress test, and the spacing is the specified behavior.
+
+Items of the #37 checklist this suite does not cover live, to be checked by hand or not at all: a server idle close, the exact size limit between 12500 and 15000 ASCII characters, a repeated `--test-message` run answered with 429 (#78), a cut inside a ZWJ emoji sequence (#19), `http` to `https` redirects, a revoked trigger, 5xx and 3xx answers, a real 429 with `Retry-After`, and platform or NFS state-directory behavior.
 
 ## Safety summary
 

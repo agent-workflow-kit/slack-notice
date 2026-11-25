@@ -31,14 +31,33 @@ from typing import Any, Literal, NoReturn
 
 from slack_notice import __version__, webhook
 from slack_notice.cli import Streams, main
-from slack_notice.gateway import Connection, Response, SystemGateway
+from slack_notice.gateway import (
+    CaCandidates,
+    Connection,
+    NoUsableCA,
+    Response,
+    SystemGateway,
+    build_tls_context,
+)
 from slack_notice.render import serialize
 
 # --- the opt-in and the CI refusal ----------------------------------------------------------
 
 OPT_IN_VAR = "SLACK_NOTICE_LIVE_URL_ENV"
 REPORT_VAR = "SLACK_NOTICE_LIVE_REPORT"
-CI_VARS = ("CI", "GITHUB_ACTIONS", "BUILDKITE", "JENKINS_URL", "TF_BUILD", "GITLAB_CI")
+CI_VARS = (
+    "CI",
+    "GITHUB_ACTIONS",
+    "BUILDKITE",
+    "JENKINS_URL",
+    "TF_BUILD",
+    "GITLAB_CI",
+    "TRAVIS",
+    "TEAMCITY_VERSION",
+    "CODEBUILD_BUILD_ID",
+    "DRONE",
+    "BITBUCKET_BUILD_NUMBER",
+)
 _VARIABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}", re.ASCII)
 # The tool's own credential variable name; the live suite hands the URL to the tool under it.
 TOOL_ENV = "SLACK_WEBHOOK"
@@ -342,6 +361,9 @@ class LiveGateway(SystemGateway):
         return _RecordingConnection(inner, self._record, self._markers, self.monotonic)
 
 
+INTERRUPT_CODES = (130, 143)
+
+
 # --- running the real CLI in-process -------------------------------------------------------
 
 
@@ -397,6 +419,10 @@ def run_cli(
     try:
         code = main(full, {TOOL_ENV: url.reveal()}, gateway, streams)
     except LiveExit as end:
+        if end.code in INTERRUPT_CODES:
+            # The tool ends with 130 or 143 on SIGINT or SIGTERM: stop the whole run instead of
+            # carrying on with the next live test.
+            raise KeyboardInterrupt from None
         code = end.code
     return CliResult(
         code, out.getvalue(), err.getvalue(), gateway.exchanges[before:], time.monotonic() - started
@@ -479,7 +505,8 @@ class RawResult:
     will_close: bool
     body: str
     elapsed_ms: int
-    tls_version: str | None = None
+    header_count: int = 0
+    header_bytes: int = 0
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -488,6 +515,8 @@ class RawResult:
             "headers": self.headers,
             "location_present": self.location_present,
             "will_close": self.will_close,
+            "header_count": self.header_count,
+            "header_bytes": self.header_bytes,
             "body": self.body,
             "elapsed_ms": self.elapsed_ms,
         }
@@ -525,10 +554,8 @@ def raw_exchange(
         value = response.getheader(name)
         if value is not None:
             kept[name] = value[:120]
-    tls_version = None
-    sock = getattr(conn, "sock", None)
-    if sock is not None and hasattr(sock, "version"):
-        tls_version = sock.version()
+    every = getattr(response, "headers", None)
+    pairs = list(every.items()) if every is not None else []
     return RawResult(
         status=response.status,
         reason=str(response.reason)[:60],
@@ -538,7 +565,8 @@ def raw_exchange(
         will_close=bool(response.will_close),
         body=data.decode("utf-8", errors="replace")[:200],
         elapsed_ms=elapsed,
-        tls_version=tls_version,
+        header_count=len(pairs),
+        header_bytes=sum(len(str(k)) + len(str(v)) + 4 for k, v in pairs),
     )
 
 
@@ -576,6 +604,11 @@ class Pacer:
             self._sleep(self._gap - (now - self._last))
         self._last = self._clock()
 
+    def mark(self) -> None:
+        """Note that a network action just ended: the next ``wait`` counts from here, so a
+        series of several sends is followed by the full gap too."""
+        self._last = self._clock()
+
 
 def gaps(exchanges: Sequence[Exchange]) -> list[float]:
     """Seconds between the starts of consecutive requests."""
@@ -608,8 +641,8 @@ class ManualCheck:
 
 
 class Recorder:
-    """What a live run learned, as plain data. ``write`` refuses to write a report that holds
-    the trigger URL or a long path segment (``add_secret``)."""
+    """What a live run learned, as plain data. The report text has the trigger URL and its path
+    segments (``add_secret``) replaced by fixed text before it is returned or written."""
 
     def __init__(self, run_id: str | None = None) -> None:
         self.run_id = run_id or secrets.token_hex(3)
@@ -619,13 +652,19 @@ class Recorder:
         self.statuses: dict[int, int] = {}
         self.latencies_ms: list[int] = []
         self._secrets: list[str] = []
+        self.redactions = 0
 
     def add_secret(self, value: str) -> None:
+        self._register(value)
+        _, found, rest = value.partition("/triggers/")
+        if found:  # only the path segments after the fixed prefix are secret
+            for part in re.split(r"[/?#]", rest):
+                if len(part) >= 8:
+                    self._register(part)
+
+    def _register(self, value: str) -> None:
         if value and value not in self._secrets:
             self._secrets.append(value)
-            for part in value.split("/"):
-                if len(part) >= 8 and part not in self._secrets:
-                    self._secrets.append(part)
 
     def observe(self, item: str, key: str, value: Any) -> None:
         if item not in ITEMS:
@@ -694,8 +733,7 @@ class Recorder:
 
     def to_json(self) -> str:
         text = json.dumps(self._finish(), indent=2, ensure_ascii=True, sort_keys=False)
-        self._assert_clean(text)
-        return text + "\n"
+        return self._scrub(text) + "\n"
 
     def to_text(self) -> str:
         data = self._finish()
@@ -715,14 +753,17 @@ class Recorder:
             lines.append("")
         lines.append("tests:")
         lines += [f"    {name}: {state}" for name, state in data["tests"].items()]
-        text = "\n".join(lines) + "\n"
-        self._assert_clean(text)
-        return text
+        return self._scrub("\n".join(lines) + "\n")
 
-    def _assert_clean(self, text: str) -> None:
-        for secret in self._secrets:
-            if secret in text:
-                raise ValueError("the report would contain trigger URL material; not written")
+    def _scrub(self, text: str) -> str:
+        """Replace any trigger URL material by fixed text: the report is always written, because
+        losing it after a full run would cost every post that produced it."""
+        for secret in sorted(self._secrets, key=len, reverse=True):
+            hits = text.count(secret)
+            if hits:
+                self.redactions += hits
+                text = text.replace(secret, _REDACTED)
+        return text
 
     def write(self, directory: Path) -> tuple[Path, Path]:
         """Write ``report.json`` and ``report.txt`` (mode 0600) into ``directory``."""
@@ -736,6 +777,29 @@ class Recorder:
                 handle.write(text)
             paths.append(path)
         return paths[0], paths[1]
+
+
+def ca_sources(candidates: CaCandidates) -> dict[str, Any]:
+    """Which of the tool's CA sources load certificates on this machine, using the tool's own
+    ``build_tls_context`` on one source at a time (local file reads only, no network). ``used``
+    names what the tool itself would use: the compiled file and directory when usable, else the
+    first usable fallback bundle. A directory counts certificates only once they are loaded, so
+    its count may be 0 while it is usable."""
+    probes = {
+        "cafile": CaCandidates(candidates.cafile, None, ()),
+        "capath": CaCandidates(None, candidates.capath, ()),
+        "fallback": CaCandidates(None, None, candidates.fallback_files),
+    }
+    counts: dict[str, int | None] = {}
+    for name, probe in probes.items():
+        try:
+            counts[name] = build_tls_context(probe).cert_store_stats().get("x509_ca", 0)
+        except NoUsableCA:
+            counts[name] = None
+    used = [name for name in ("cafile", "capath") if counts[name] is not None]
+    if not used and counts["fallback"] is not None:
+        used = ["fallback"]
+    return {"loaded_ca_certs": counts, "used": used or ["none"]}
 
 
 def report_directory(env: Mapping[str, str]) -> Path:
