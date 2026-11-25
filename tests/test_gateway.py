@@ -254,16 +254,21 @@ def test_only_the_gateway_references_network_clock_lock_or_process_modules() -> 
     assert {name: found for name, found in offenders.items() if found} == {}
 
 
-FS_OS_NAMES = frozenset({"stat", "lstat", "open", "scandir", "listdir", "access", "readlink"})
-FS_PATH_NAMES = frozenset({"isdir", "isfile", "exists", "lexists", "islink", "getsize"})
+# Outside the gateway only these `os` / `os.path` attributes are allowed (pure string helpers and
+# the terminal check, `write` to the output descriptors); everything else (remove, rename,
+# makedirs, walk, getcwd, expanduser, abspath, realpath, stat, ...) is filesystem or process-state
+# access and belongs to the gateway.
+OS_ALLOWED = frozenset({"path", "isatty", "write", "fspath", "fsencode", "fsdecode", "sep"})
+OS_PATH_ALLOWED = frozenset({"join", "dirname", "basename", "isabs", "sep"})
+BANNED_FS_MODULES = frozenset({"pathlib", "shutil", "glob", "tempfile", "fileinput"})
+BANNED_OPENERS = frozenset({("io", "open"), ("codecs", "open")})
 
 
 def filesystem_references(source: str) -> list[str]:
-    """Direct filesystem access: builtin ``open(``, any ``pathlib`` import, and probes
-    (``os.path.isdir``, ``os.stat``, ``os.open``, ...), by attribute
-    on ``os`` or ``os.path`` (tracked through ``import os`` / ``import os.path`` and aliases)
-    and by ``from os import x`` / ``from os.path import x``. Pure string helpers such as
-    ``os.path.join`` are not flagged. All file access belongs to the gateway."""
+    """Direct filesystem access outside the gateway: builtin ``open(``, imports of pathlib,
+    shutil, glob, tempfile and fileinput, ``io.open`` / ``codecs.open``, and any ``os`` /
+    ``os.path`` attribute outside the allowlists above (tracked through ``import os`` /
+    ``import os.path`` and aliases, and ``from os import x`` / ``from os.path import x``)."""
     tree = ast.parse(source)
     os_aliases = {
         (a.asname or a.name.split(".")[0])
@@ -286,38 +291,56 @@ def filesystem_references(source: str) -> list[str]:
         for a in node.names
         if a.name == "path"
     }
+    opener_modules = {
+        (a.asname or a.name): a.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for a in node.names
+        if a.name in ("io", "codecs")
+    }
     found: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            found += [f"import {a.name}" for a in node.names if a.name.split(".")[0] == "pathlib"]
+            found += [
+                f"import {a.name}" for a in node.names if a.name.split(".")[0] in BANNED_FS_MODULES
+            ]
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
-            if (node.module or "").split(".")[0] == "pathlib":
-                found.append(f"from {node.module} import ...")
-            elif node.module == "os":
-                found += [f"os.{a.name}" for a in node.names if a.name in FS_OS_NAMES]
-            elif node.module == "os.path":
-                found += [f"os.path.{a.name}" for a in node.names if a.name in FS_PATH_NAMES]
+            module = node.module or ""
+            if module.split(".")[0] in BANNED_FS_MODULES:
+                found.append(f"from {module} import ...")
+            elif module == "os":
+                found += [f"os.{a.name}" for a in node.names if a.name not in OS_ALLOWED]
+            elif module == "os.path":
+                found += [f"os.path.{a.name}" for a in node.names if a.name not in OS_PATH_ALLOWED]
+            elif module in ("io", "codecs"):
+                found += [
+                    f"{module}.open" for a in node.names if (module, a.name) in BANNED_OPENERS
+                ]
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id == "open":
                 found.append("open")
         if isinstance(node, ast.Attribute):
             base = node.value
-            if (
-                isinstance(base, ast.Name)
-                and base.id in path_aliases
-                and node.attr in FS_PATH_NAMES
-            ):
-                found.append(f"os.path.{node.attr}")
-            elif isinstance(base, ast.Name) and base.id in os_aliases and node.attr in FS_OS_NAMES:
-                found.append(f"os.{node.attr}")
+            if isinstance(base, ast.Name) and base.id in path_aliases:
+                if node.attr not in OS_PATH_ALLOWED:
+                    found.append(f"os.path.{node.attr}")
+            elif isinstance(base, ast.Name) and base.id in os_aliases:
+                if node.attr not in OS_ALLOWED:
+                    found.append(f"os.{node.attr}")
             elif (
                 isinstance(base, ast.Attribute)
                 and base.attr == "path"
                 and isinstance(base.value, ast.Name)
                 and base.value.id in os_aliases
-                and node.attr in FS_PATH_NAMES
+                and node.attr not in OS_PATH_ALLOWED
             ):
                 found.append(f"os.path.{node.attr}")
+            elif (
+                isinstance(base, ast.Name)
+                and base.id in opener_modules
+                and (opener_modules[base.id], node.attr) in BANNED_OPENERS
+            ):
+                found.append(f"{opener_modules[base.id]}.{node.attr}")
     return found
 
 
@@ -338,6 +361,30 @@ def filesystem_references(source: str) -> list[str]:
         "from pathlib import Path",
         "import pathlib\npathlib.Path('x').is_dir()",
         "open('x')",
+        "import shutil",
+        "from shutil import rmtree",
+        "import glob",
+        "import tempfile",
+        "from tempfile import mkstemp",
+        "import fileinput",
+        "import io\nio.open('x')",
+        "import io as i\ni.open('x')",
+        "import codecs\ncodecs.open('x')",
+        "from io import open",
+        "import os\nos.fdopen(3)",
+        "import os\nos.remove('x')",
+        "import os\nos.unlink('x')",
+        "import os\nos.rename('a', 'b')",
+        "import os\nos.makedirs('x')",
+        "import os\nos.chmod('x', 0)",
+        "import os\nos.walk('x')",
+        "import os\nos.getcwd()",
+        "import os\nos.path.expanduser('~')",
+        "import os\nos.path.abspath('x')",
+        "import os\nos.path.realpath('x')",
+        "from os import getcwd",
+        "from os.path import realpath",
+        "import os.path as p\np.abspath('x')",
     ],
 )
 def test_filesystem_checker_detects_probes(source: str) -> None:
@@ -356,6 +403,10 @@ def test_filesystem_checker_detects_probes(source: str) -> None:
         "def f(x):\n    return x.open('y')",
         "def open(x):\n    return x\n",
         "import pathlib_like",
+        "import os\nos.isatty(0)",
+        "import os\nos.path.dirname('a/b')",
+        "from os.path import join, dirname",
+        "import io\nio.StringIO()",
     ],
 )
 def test_filesystem_checker_accepts_other_references(source: str) -> None:

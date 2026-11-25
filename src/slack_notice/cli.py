@@ -407,6 +407,7 @@ def load_settings(ctx: Context) -> dict[str, Any]:
     missing --config file) in details.key and a fixed message. The values are not validated yet.
     """
     # TODO(#11): validate the values and map DurationError and unknown keys to config_invalid.
+    # TODO(#28), TODO(#31), TODO(#32): the send and validate handlers call this; they wire it in.
     key: str | None = None
     values: dict[str, Any] = {}
     try:

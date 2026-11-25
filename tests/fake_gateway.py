@@ -689,6 +689,8 @@ class FakeGateway(SystemGateway):
         return super().read_regular_file(path, max_bytes)
 
     def absolute_path(self, path: str) -> str:
+        # Deliberate: test_every_gateway_method_is_overridden_by_the_fake requires each method to be
+        # faked on purpose. The real (pure) implementation is what the tests want.
         return super().absolute_path(path)
 
     def list_directory(self, path: str) -> list[str]:

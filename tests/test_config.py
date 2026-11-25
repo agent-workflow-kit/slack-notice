@@ -109,6 +109,7 @@ def test_yaml_one_one_lookalikes_stay_strings(scalar: str) -> None:
         "010", "00", "007", "01.5", "1:30", "1:30:00", "0x10", "0xFF", "0b1", "1_0", "1_000",
         "+5", "+1.5", "5.", ".5", "0.", ".inf", "-.inf", "+.inf", ".Inf", ".INF", ".nan",
         ".NaN", ".NAN", "1_0.5", "190:20:30",
+        "08", "09", "0189", "-08", "+08", "-0189", "0_8", "00_9",
     ],
 )  # fmt: skip
 def test_number_lookalikes_are_refused_not_kept_as_strings(scalar: str) -> None:
@@ -208,6 +209,7 @@ def test_a_key_that_is_not_a_string_is_refused(text: str) -> None:
 
 
 def test_a_merge_key_is_a_plain_string_key_not_a_merge() -> None:
+    # `<<: *alias` is refused because aliases are refused; a literal `<<` key is an ordinary key.
     assert parse_yaml(b"<<: {a: 1}\nb: 2\n") == {"<<": {"a": 1}, "b": 2}
 
 
@@ -363,6 +365,23 @@ def test_nested_collections_are_limited_in_depth() -> None:
     ):
         with no_hang(), pytest.raises(ValueError):
             parse_yaml(text.encode())
+
+
+def _block(depth: int) -> str:
+    return "".join("  " * i + "a:\n" for i in range(depth - 1)) + "  " * (depth - 1) + "a: 1\n"
+
+
+def test_ten_nested_collections_are_accepted_and_eleven_refused() -> None:
+    # The top-level mapping counts as the first collection.
+    assert parse_yaml(_block(10).encode())
+    with pytest.raises(ValueError):
+        parse_yaml(_block(11).encode())
+    assert parse_yaml(("a: " + "[" * 9 + "]" * 9 + "\n").encode())
+    with pytest.raises(ValueError):
+        parse_yaml(("a: " + "[" * 10 + "]" * 10 + "\n").encode())
+    assert parse_yaml(("a: " + "{a: " * 9 + "1" + "}" * 9 + "\n").encode())
+    with pytest.raises(ValueError):
+        parse_yaml(("a: " + "{a: " * 10 + "1" + "}" * 10 + "\n").encode())
 
 
 def test_the_depth_limit_admits_the_documented_shape() -> None:
@@ -647,6 +666,18 @@ def test_a_path_too_long_for_the_envelope_is_reported_as_unknown(
     long = str(tmp_path) + "/" + "d/" * 3000 + "x.yaml"
     assert len(long) > 4096
     assert invalid_key(fake_gateway, long) == "?"  # ENAMETOOLONG is unreadable, not missing
+
+
+def test_a_non_utf8_dropin_name_is_reported_as_unknown(
+    fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    directory = default_file(fake_gateway).parent / "config.d"
+    directory.mkdir()
+    (directory / "ok.yaml").write_text("enabled: true\n")
+    raw = os.fsencode(str(directory)) + b"/\xff.yaml"
+    with open(raw, "wb") as handle:
+        handle.write(b"[")
+    assert invalid_key(fake_gateway) == "?"
 
 
 def test_config_example_loads_to_the_stated_defaults(fake_gateway: FakeGateway) -> None:

@@ -175,7 +175,8 @@ class ConfigInvalid(Exception):
 
 class _StrictLoader(yaml.SafeLoader):
     """PyYAML's SafeLoader with only the resolvers the interface keeps, and no tags, anchors,
-    aliases, merge keys, duplicate keys or keys that are not strings."""
+    aliases, duplicate keys or keys that are not strings. (`<<: *alias` fails on the alias; a
+    literal `<<` key is an ordinary string key.)"""
 
     # No inherited implicit resolver: the ones below are the only ones. (Class attribute: the
     # subclass owns its table, so the shared one in PyYAML is never changed.)
@@ -239,6 +240,9 @@ for _first, _entries in yaml.resolver.Resolver.yaml_implicit_resolvers.items():
     for _tag, _regexp in _entries:
         if _tag in ("tag:yaml.org,2002:int", "tag:yaml.org,2002:float"):
             _StrictLoader.add_implicit_resolver(_REFUSED, _regexp, [_first])
+# PyYAML's octal pattern is 0[0-7_]+, so 08, 09 and 0189 would stay strings (and pass the duration
+# grammar as eight seconds); any other leading-zero integer lookalike is refused too.
+_StrictLoader.add_implicit_resolver(_REFUSED, re.compile(r"\A[-+]?0[0-9_]+\Z"), list("-+0"))
 _StrictLoader.add_constructor(_REFUSED, _refuse_node)
 
 
@@ -331,8 +335,13 @@ def resolve_settings(
 
 
 def _display(gateway: Gateway, path: str) -> str:
-    """A path for details.key: absolute (so never `home` or `--config`), `?` when too long."""
+    """A path for details.key: absolute (so never `home` or `--config`), `?` when too long or when
+    it does not round-trip through UTF-8 (a non-UTF-8 name holds lone surrogates)."""
     shown = gateway.absolute_path(path)
+    try:
+        shown.encode("utf-8")
+    except UnicodeEncodeError:
+        return "?"
     return shown if len(shown) <= MAX_KEY_CHARS else "?"
 
 
