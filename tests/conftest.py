@@ -7,8 +7,8 @@ Scope of the guard, stated honestly:
   socket and name-resolution entry points raise ``NetworkRefused``.
 - Child processes are NOT guarded: a test that spawns one must give it a private HOME and XDG
   environment itself (and its own no-config flags).
-- The gateway's home directory and uid are faked through the fake gateway added in issue #5;
-  until then, code under test must not rely on the real password entry.
+- The gateway's home directory and uid come from ``tests/fake_gateway.py`` (the
+  ``fake_gateway`` fixture): code under test must never rely on the real password entry.
 - Tests marked ``live`` keep the HOME isolation but are not network-blocked.
 """
 
@@ -19,9 +19,12 @@ import pwd
 import socket
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
+
+if TYPE_CHECKING:
+    from tests.fake_gateway import FakeGateway
 
 
 class NetworkRefused(BaseException):  # noqa: N818  (BaseException so `except Exception` cannot swallow it)
@@ -68,3 +71,20 @@ def isolated_environment(
             monkeypatch.setattr(socket, name, refuse_network)
             monkeypatch.setattr(_socket, name, refuse_network)
     yield
+
+
+@pytest.fixture
+def fake_gateway(tmp_path: Path) -> Iterator[FakeGateway]:
+    """A fake gateway with a private home (mode 0700) and no stalls left behind.
+
+    Teardown fails the test on a recorded contract violation or an unconsumed scripted attempt
+    (set ``allow_unconsumed_script`` to leave attempts on purpose)."""
+    from tests.fake_gateway import FakeGateway  # lazy: scaffold tests copy this conftest alone
+
+    home = tmp_path / "gwhome"
+    home.mkdir(mode=0o700)
+    gateway = FakeGateway(home=str(home))
+    yield gateway
+    gateway.release_stalls()  # a daemon worker blocked in a stall must not outlive the test
+    # A contract violation inside a worker thread would only surface as an exit 1 "internal".
+    gateway.assert_clean()
