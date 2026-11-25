@@ -29,8 +29,11 @@ import functools
 import json
 import os
 import re
+import signal
 import sys
-from collections.abc import Callable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, Protocol
 
@@ -59,6 +62,7 @@ from slack_notice.payload import (
     sanitize_notification,
     validate_notification,
 )
+from slack_notice.render import render
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
 ERROR_EXIT_CODES = frozenset({1, 2, 12, 20})
@@ -197,15 +201,30 @@ def system_streams() -> Streams:
 class Output:
     """Writes the result and the human lines; one place for the encoding and failure rules."""
 
-    def __init__(self, streams: Streams, *, verbose: bool, quiet: bool) -> None:
+    def __init__(
+        self,
+        streams: Streams,
+        *,
+        verbose: bool,
+        quiet: bool,
+        gate: _SignalGate | None = None,
+    ) -> None:
         self._streams = streams
         self._verbose = verbose
         self._quiet = quiet
+        self._gate = _SignalGate() if gate is None else gate
         self._lenient = False
 
     def result_printed(self) -> None:
-        """Called once step 6 is over: from here on a write failure is ignored."""
+        """Called immediately BEFORE the result is written, once step 6 is over (a dry run has
+        no step 6, so the print is its last step): from here on a write failure is ignored and a
+        signal no longer ends the run, so the result is never cut short."""
         self._lenient = True
+        self.commit()
+
+    def commit(self) -> None:
+        """The result print begins: a signal from here on is ignored."""
+        self._gate.committed = True
 
     def _write(self, sink: ByteSink, text: str) -> None:
         data = text.encode("utf-8", errors="replace")
@@ -225,10 +244,17 @@ class Output:
     def json_document(self, document: object) -> None:
         self.out(json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n")
 
+    def _advisory(self, text: str) -> None:
+        """stderr text is advisory: a failure to write it never changes the outcome."""
+        try:
+            self.err(text)
+        except (OSError, ValueError):
+            pass
+
     def info(self, line: str) -> None:
-        """A human line that --quiet suppresses."""
+        """A human line that --quiet suppresses; best effort."""
         if not self._quiet:
-            self.err(line + "\n")
+            self._advisory(line + "\n")
 
     def warning(self, line: str) -> None:
         self.err(line + "\n")
@@ -239,7 +265,7 @@ class Output:
     def phase(self, name: str, elapsed_ms: int) -> None:
         """A --verbose line: the phase and its elapsed milliseconds, nothing else."""
         if self._verbose:
-            self.err(f"{name}: {elapsed_ms} ms\n")
+            self._advisory(f"{name}: {elapsed_ms} ms\n")
 
     def finish(self) -> None:
         """One flush attempt of each stream; failures are ignored."""
@@ -481,6 +507,56 @@ def check_stdin_source(args: argparse.Namespace, streams: Streams) -> None:
         raise usage_error("stdin is a terminal: give --message, --stdin-json or --file")
 
 
+# --- signals ------------------------------------------------------------------------------------
+
+SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+
+
+class _Signalled(BaseException):  # noqa: N818  (not an Exception: no handler may swallow it)
+    """A signal ended the run: exit 128+N with no envelope and no output."""
+
+    def __init__(self, number: int) -> None:
+        super().__init__(number)
+        self.number = number
+
+
+class _SignalGate:
+    """Whether the result print has begun: from then on a signal is ignored (interface: Signals)."""
+
+    def __init__(self) -> None:
+        self.committed = False
+
+
+@contextmanager
+def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
+    """SIGTERM, SIGINT and SIGHUP raise ``_Signalled`` once; the old handlers come back after.
+
+    Once ``gate.committed`` (the result print has begun) the handler returns and the signal is
+    ignored: the result is printed whole and the exit code is the result's. The handlers stay
+    installed until the result is printed and flushed.
+    Handlers can only be installed from the main thread; elsewhere nothing is installed.
+    TODO(#25), TODO(#27): from step 5 on a signal is the deadline passing, not an exit (the gate
+    decides), and the commit point narrows to the start of the printing of the result.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def handler(number: int, _frame: object) -> None:
+        if gate.committed:
+            return
+        for other in SIGNALS:  # handled once: a second signal while unwinding is ignored
+            signal.signal(other, signal.SIG_IGN)
+        raise _Signalled(number)
+
+    saved = {number: signal.signal(number, handler) for number in SIGNALS}
+    try:
+        yield
+    finally:
+        for number, previous in saved.items():
+            signal.signal(number, previous)
+
+
 # --- dispatch ------------------------------------------------------------------------------------
 
 
@@ -494,7 +570,7 @@ def load_settings(ctx: Context) -> dict[str, Any]:
     same error with the config key name (or `?`) in details.key and a message that names the key
     and the rule (never the value).
     """
-    # TODO(#28), TODO(#31), TODO(#32): the send and validate handlers call this; they wire it in.
+    # The send dry run calls this; TODO(#28), TODO(#31), TODO(#32): the real send and validate.
     key: str | None = None
     message = ""
     settings: dict[str, Any] = {}
@@ -527,9 +603,9 @@ def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
     ``remaining`` is the seconds left of the deadline, which starts at step 3. The caller
     never sees input text in an error.
 
-    TODO(#28): the send handler calls this, starts the deadline and logs ``failed`` for the
+    The dry run calls this and starts the deadline. TODO(#28): the real send logs ``failed`` for the
     timeout error (a log record for exit 12 ``unavailable``, phase ``input``).
-    TODO(#27): a signal during this call must exit 128+N; the handler has to raise or exit.
+    A signal during this call raises ``_Signalled`` from the handler of ``_exit_on_signal``.
     """
     file_arg: str | None = ctx.args.file
     source: int | str = 0 if file_arg is None or file_arg == "-" else file_arg
@@ -573,7 +649,7 @@ def load_notification(ctx: Context, remaining: float) -> dict[str, Any]:
     The error holds a fixed message and the pointer, never an input value.
 
     ``sanitize_loaded`` (the sanitizer, ``empty_message`` and the link rule) comes after this.
-    TODO(#28): the send handler calls this after starting the deadline.
+    The send handler calls this after starting the deadline.
     """
     args = ctx.args
     refused: FieldRefused | None = None
@@ -623,9 +699,67 @@ def _not_implemented(_ctx: Context) -> int:
     raise NotImplementedError
 
 
-# TODO(#28): the send command. TODO(#31), TODO(#32): validate.
+def _elapsed_ms(ctx: Context, since: float) -> int:
+    return max(0, int((ctx.gateway.monotonic() - since) * 1000))
+
+
+def _disabled(ctx: Context) -> int:
+    """Step 2, `enabled: false`: not an error, nothing sent, exit 22."""
+    ctx.output.result_printed()  # before the print: the print is the last step
+    if ctx.json:
+        ctx.output.json_document({"outcome": "disabled"})
+    else:
+        ctx.output.info("disabled in config")
+    return 22
+
+
+def send(ctx: Context) -> int:
+    """The `send` command (interface: Send, steps 1 to 7).
+
+    Step 1 ran in ``parse`` and ``check_stdin_source``, and the home lookup of step 2 in ``_run``.
+    Only the dry run is implemented: it ends at step 4 and uses no credential, no state
+    directory, no lock and no log (``ctx.env`` and ``ctx.state_dir()`` are not touched).
+    """
+    if not ctx.dry_run:
+        # TODO(#28): steps 1 to 7 of a real send; the shared steps 2 to 4 move out of
+        # ``_dry_run`` into this function, and steps 5 to 7 follow them.
+        return _not_implemented(ctx)
+    return _dry_run(ctx)
+
+
+def _dry_run(ctx: Context) -> int:
+    settings = load_settings(ctx)  # step 2: config over defaults (exit 2 config_invalid)
+    if not settings["enabled"]:
+        return _disabled(ctx)
+    started = ctx.gateway.monotonic()  # step 3: the deadline starts here
+    notification = sanitize_loaded(load_notification(ctx, settings["timeout"]))
+    ctx.output.phase("input", _elapsed_ms(ctx, started))
+    phase_start = ctx.gateway.monotonic()
+    rendered = render(notification, settings)  # step 4
+    ctx.output.phase("render", _elapsed_ms(ctx, phase_start))
+    ctx.output.result_printed()  # before the print: a dry run has no step 6
+    if ctx.json:
+        ctx.output.json_document(
+            {
+                "outcome": "dry_run",
+                "tool": "slack-notice",
+                "level": notification.level,
+                "truncated": rendered.truncated,
+                "bytes": rendered.bytes,
+                "duration_ms": _elapsed_ms(ctx, started),
+                "http_status": None,
+                "dedupe_key": ctx.args.dedupe_key,
+                "rendered": rendered.text,
+            }
+        )
+    else:
+        ctx.output.info(rendered.text)
+    return 0
+
+
+# TODO(#31), TODO(#32): validate.
 HANDLERS: dict[str, Callable[[Context], int]] = {
-    "send": _not_implemented,
+    "send": send,
     "validate": _not_implemented,
 }
 
@@ -667,6 +801,7 @@ def _run(
     gateway: Gateway,
     streams: Streams,
     holder: list[Context],
+    gate: _SignalGate,
 ) -> int:
     args = parse(argv)
     check_stdin_source(args, streams)
@@ -676,7 +811,7 @@ def _run(
         args=args,
         env=env,
         gateway=gateway,
-        output=Output(streams, verbose=args.verbose, quiet=args.quiet),
+        output=Output(streams, verbose=args.verbose, quiet=args.quiet, gate=gate),
         json=json_requested(argv),
         dry_run=args.dry_run,
         verbose=args.verbose,
@@ -692,14 +827,38 @@ def _run(
 
 def _emit(output: Output, outcome: _EarlyExit | CliError, *, json_mode: bool) -> None:
     if isinstance(outcome, _EarlyExit):
+        output.commit()
         output.out(outcome.text)
         return
-    # A CliError is the result: it counts as printed, so a failing stream never replaces its
-    # exit code, and the envelope and the stderr line are each tried on their own.
+    # A CliError is the result: it counts as printed (before the first write, so a failing
+    # stream never replaces its exit code and a signal never cuts it short), and the envelope
+    # and the stderr line are each tried on their own.
     output.result_printed()
     if json_mode:
         output.json_document(outcome.envelope())
     output.error_line(outcome.stderr_line())
+
+
+class _LazyEnv(Mapping[str, str]):
+    """The environment, copied from the gateway on first access (it holds the credential)."""
+
+    def __init__(self, gateway: Gateway) -> None:
+        self._gateway = gateway
+        self._values: dict[str, str] | None = None
+
+    def _load(self) -> dict[str, str]:
+        if self._values is None:
+            self._values = self._gateway.environ()
+        return self._values
+
+    def __getitem__(self, key: str) -> str:
+        return self._load()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._load())
+
+    def __len__(self) -> int:
+        return len(self._load())
 
 
 def main(
@@ -710,16 +869,35 @@ def main(
 ) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     gateway = SystemGateway() if gateway is None else gateway
-    env = gateway.environ() if env is None else env
     streams = system_streams() if streams is None else streams
+    gate = _SignalGate()
+    try:
+        # The handlers stay installed through the printing of the result: a signal before the
+        # result print is 128+N with no output, one during or after it is ignored.
+        with _exit_on_signal(gate):
+            return _main(argv, env, gateway, streams, gate)
+    except _Signalled as signalled:
+        return 128 + signalled.number  # no envelope, no output, no log record
+
+
+def _main(
+    argv: list[str],
+    env: Mapping[str, str] | None,
+    gateway: Gateway,
+    streams: Streams,
+    gate: _SignalGate,
+) -> int:
     json_mode = json_requested(argv)
     holder: list[Context] = []
     outcome: _EarlyExit | CliError | None = None
     code = 0
-    # Only Exception is caught: SystemExit and KeyboardInterrupt (a signal) pass straight
-    # through. TODO(#27): signal handlers that exit 128+N before step 5.
+    # Only Exception is caught: SystemExit, KeyboardInterrupt and ``_Signalled`` (a signal, see
+    # ``_exit_on_signal``) pass straight through.
     try:
-        code = _run(argv, env, gateway, streams, holder)
+        # TODO(#28): a real send reads the credential from the environment at step 5; a dry run
+        # never does, so the copy is made on first access only.
+        lazy_env = _LazyEnv(gateway) if env is None else env
+        code = _run(argv, lazy_env, gateway, streams, holder, gate)
     except _EarlyExit as early:
         outcome = early
     except CliError as error:
@@ -727,7 +905,7 @@ def main(
     except Exception as exc:
         outcome = _internal_error(exc, gate_writing=bool(holder and holder[0].gate_writing))
         code = 1
-    output = holder[0].output if holder else Output(streams, verbose=False, quiet=False)
+    output = holder[0].output if holder else Output(streams, verbose=False, quiet=False, gate=gate)
     try:
         if outcome is not None:
             _emit(output, outcome, json_mode=json_mode)

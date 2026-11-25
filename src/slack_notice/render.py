@@ -4,7 +4,7 @@
 request body. Nothing is escaped: the trigger variable is plain text. The link is counted and
 written exactly as given and never cut.
 
-TODO(#20): the dry-run command prints ``Rendered.text`` and the counts.
+The dry run (``cli.send``) prints ``Rendered.text`` and reports ``bytes`` and ``truncated``.
 TODO(#28): the send path posts ``Rendered.body``.
 """
 

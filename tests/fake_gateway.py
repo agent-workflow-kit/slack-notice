@@ -496,6 +496,10 @@ class FakeGateway(SystemGateway):
         self.state_delay = 0.0  # seconds per state-file operation (open, lock, read)
         self.stall_cap_seconds = 30.0
         self.events: list[str] = []
+        # environment, clock and identity calls, and every path read: for "touched nothing else"
+        # assertions (kept apart from ``events``, which other tests compare whole)
+        self.calls: list[str] = []
+        self.read_paths: list[str] = []
         self.connections: list[FakeConnection] = []
         # Gateway.resolve hook only: connect() never calls it (see the module docstring)
         self.resolve_addresses = ["192.0.2.1"]
@@ -601,6 +605,7 @@ class FakeGateway(SystemGateway):
             return time.monotonic() + self._skew
 
     def wall_time(self) -> float:
+        self.calls.append("wall_time")
         return self._wall_start + (self.monotonic() - self._t0)
 
     def sleep(self, seconds: float) -> None:
@@ -625,6 +630,7 @@ class FakeGateway(SystemGateway):
         return list(self.resolve_addresses)
 
     def home_dir(self) -> str:
+        self.calls.append("home_dir")
         self.home_lookups += 1
         if self._home_error:
             raise HomeLookupError
@@ -636,12 +642,15 @@ class FakeGateway(SystemGateway):
         return super().is_directory(path)
 
     def uid(self) -> int:
+        self.calls.append("uid")
         return self._uid
 
     def environ(self) -> dict[str, str]:
+        self.calls.append("environ")
         return dict(self._environment)
 
     def login_name(self) -> str | None:
+        self.calls.append("login_name")
         return self._login_name
 
     # -- input and files --
@@ -650,6 +659,8 @@ class FakeGateway(SystemGateway):
         self, fd_or_path: int | str | os.PathLike[str], max_bytes: int, remaining: float
     ) -> SourceRead:
         self._record("read_source")
+        if not isinstance(fd_or_path, int):
+            self.read_paths.append(os.fspath(fd_or_path))
         self.source_reads += 1
         if self.source_script:
             result = self.source_script.pop(0)
@@ -722,6 +733,7 @@ class FakeGateway(SystemGateway):
 
     def read_regular_file(self, path: str | os.PathLike[str], max_bytes: int) -> bytes:
         self._record("read_regular_file")
+        self.read_paths.append(os.fspath(path))
         self._advance(self.state_delay)
         error = self.file_errors.get(os.fspath(path))
         if error is not None:
@@ -735,6 +747,7 @@ class FakeGateway(SystemGateway):
 
     def list_directory(self, path: str) -> list[str]:
         self._record("list_directory")
+        self.read_paths.append(path)
         error = self.directory_errors.get(path)
         if error is not None:
             raise error
