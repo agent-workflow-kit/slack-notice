@@ -785,9 +785,17 @@ def test_read_source_deadline_runs_on_the_fake_clock(gw: FakeGateway) -> None:
     """An hour of deadline ends in well under 2 real seconds once the fake clock jumps ahead."""
     read_end, write_end = os.pipe()
 
+    stop = threading.Event()
+
     def jump() -> None:
-        time.sleep(0.3)  # real time: let the read start, then advance the fake clock
-        gw.sleep(4000.0)
+        # Advance the fake clock only once read_source has started, then keep advancing until
+        # the test ends, so a late start can never leave the read polling for an hour.
+        while "read_source" not in gw.events and not stop.wait(0.01):
+            pass
+        stop.wait(0.1)  # real time: let the read take its deadline from the fake clock
+        while not stop.is_set():
+            gw.sleep(4000.0)
+            stop.wait(0.2)
 
     helper = threading.Thread(target=jump, daemon=True)
     try:
@@ -797,6 +805,7 @@ def test_read_source_deadline_runs_on_the_fake_clock(gw: FakeGateway) -> None:
         assert result.timed_out
         assert time.monotonic() - real_start < 2.0
     finally:
+        stop.set()
         helper.join(5)
         os.close(read_end)
         os.close(write_end)
@@ -1233,12 +1242,15 @@ def test_reply_refuses_a_body_where_http_client_forces_none(status: int) -> None
         {"body_stall_after": -1},
         {"body_stall_after": 11},  # the declared total
         {"body_stall_after": 12},
+        {"body": b"ab", "truncated_by": 5, "body_stall_after": 3},  # past the EOF event
+        {"body": b"ab", "truncated_by": 5, "body_stall_after": 5},
+        {"body": b"ab", "truncated_by": 5, "body_error": OSError(), "body_error_after": 3},
         {"head_stall_after": -1},
         {"body_error": OSError(), "body_error_after": 11},
         {"body_error": OSError(), "body_error_after": -1},
     ],
 )
-def test_reply_refuses_impossible_stall_and_error_points(kwargs: dict[str, object]) -> None:
+def test_reply_refuses_bad_stall_and_error_points(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         Reply(**kwargs)  # type: ignore[arg-type]
 

@@ -163,9 +163,11 @@ class Reply:
     ``first_byte_delay``: seconds before any byte arrives. ``head_trickle`` / ``body_trickle``:
     seconds between bytes of the status line and headers / of the body. ``head_stall_after`` /
     ``body_stall_after``: bytes delivered before the host goes silent (1 is "a stall after the
-    first byte"); a body stall point is below the declared total (``len(body) + truncated_by``).
+    first byte"); a body stall point is below the declared total (``len(body) + truncated_by``)
+    and at most ``len(body)`` (bytes beyond it never arrive, so the end event comes first).
     ``body_error`` is raised from the read that needs a body byte past ``body_error_after``
-    (a reset or TLS failure in mid-body); later reads end as an ``IncompleteRead``.
+    (a reset or TLS failure in mid-body; at most ``len(body)``); later reads end as an
+    ``IncompleteRead``.
 
     ``framing``: ``length`` (Content-Length, a short body is an ``IncompleteRead``), ``chunked``
     (a short body is an ``IncompleteRead`` with no partial data on the read that needs the
@@ -202,10 +204,14 @@ class Reply:
             raise ValueError(f"framing must be one of {_FRAMINGS}")
         if self.body_stall_after is not None and not 0 <= self.body_stall_after < total:
             raise ValueError("body_stall_after must be within 0 .. declared total - 1")
+        if self.body_stall_after is not None and self.body_stall_after > len(self.body):
+            raise ValueError("body_stall_after must not exceed len(body): later bytes never arrive")
         if self.head_stall_after is not None and self.head_stall_after < 0:
             raise ValueError("head_stall_after must not be negative")
         if self.body_error is not None and not 0 <= self.body_error_after < total:
             raise ValueError("body_error_after must be within 0 .. declared total - 1")
+        if self.body_error is not None and self.body_error_after > len(self.body):
+            raise ValueError("body_error_after must not exceed len(body): later bytes never arrive")
 
 
 @dataclass(frozen=True)
