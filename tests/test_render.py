@@ -221,7 +221,7 @@ def test_cut_may_split_sequences() -> None:
     message = "x" * (keep - 2) + zwj + "tail" * 20
     text = render(san(message), cfg).text
     assert text.endswith("x" * (keep - 2) + "\U0001f468\u200d" + MARKER)
-    message = "x" * (keep - 1) + "e\u0301" + "z" * 5
+    message = "x" * (keep - 1) + "e\u0301" + "z" * 50
     assert render(san(message), cfg).text.endswith("x" * (keep - 1) + "e" + MARKER)
     # Never a lone surrogate: code points, not UTF-16 units.
     render(san(message), cfg).body.decode("utf-8")
@@ -310,9 +310,7 @@ def test_bytes_is_the_request_body_length() -> None:
 
 def test_serialization_is_compact_non_ascii_utf8() -> None:
     result = render(san("café € \U0001f600", title="t"), settings())
-    assert result.body == (
-        '{"body":"\U0001f535 INFO t\\ncafé € \U0001f600"}'.encode()
-    )
+    assert result.body == ('{"body":"\U0001f535 INFO t\\ncafé € \U0001f600"}'.encode())
     assert b" " not in result.body.split(b'"body":')[0]
     assert b"\\u" not in result.body
 
@@ -353,12 +351,12 @@ def test_link_is_rendered_as_given_and_never_cut() -> None:
 
 def test_no_url_parser_or_escaping_helpers_are_imported() -> None:
     tree = ast.parse((Path(__file__).parents[1] / "src/slack_notice/render.py").read_text())
-    imported = {
-        alias.name.split(".")[0]
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import | ast.ImportFrom)
-        for alias in node.names
-    } | {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported |= {alias.name.split(".")[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module.split(".")[0])
     assert not imported & {"urllib", "html", "re", "http", "socket", "time", "subprocess"}
 
 
