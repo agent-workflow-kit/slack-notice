@@ -16,8 +16,8 @@ from slack_notice.gateway import Gateway, StateUnusable
 
 # Fixed text: no path, no reason from the filesystem, nothing from hostile input.
 STATE_WARNING = (
-    "warning: the state directory cannot be used safely; no log record is written and sends "
-    "are not spaced"
+    "slack-notice: the state directory or a state file cannot be used safely; "
+    "the log record or send spacing may be skipped"
 )
 
 
@@ -38,6 +38,7 @@ class StateDir:
         self._dir_fd: int | None = None
         self._dir_failed = False
         self._warned = False
+        self._closed = False
 
     def __enter__(self) -> StateDir:
         return self
@@ -53,11 +54,14 @@ class StateDir:
     def _warn_once(self) -> None:
         if not self._warned:
             self._warned = True
-            self._warn(STATE_WARNING)
+            try:
+                self._warn(STATE_WARNING)
+            except (OSError, ValueError):
+                pass  # a broken stderr never changes what open_file returns
 
     def open_file(self, name: str, *, append: bool = False) -> int | None:
         """A descriptor for ``name`` in the state directory, or ``None`` when unusable."""
-        if self._dir_failed:
+        if self._dir_failed or self._closed:
             return None
         if self._dir_fd is None:
             try:
@@ -73,6 +77,7 @@ class StateDir:
             return None
 
     def close(self) -> None:
+        self._closed = True
         fd, self._dir_fd = self._dir_fd, None
         if fd is not None:
             self._gateway.close_fd(fd)

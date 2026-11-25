@@ -502,73 +502,105 @@ class SystemGateway:
         """Create (mode 0700) and open ``<home>/.local/state/slack-notice``; return its fd.
 
         Opened with ``O_DIRECTORY | O_NOFOLLOW`` and checked on the descriptor: owned by the
-        user, no group or other permission bits. Anything else is ``StateUnusable``.
+        user, no permission bits outside 0700 (no group or other access, no setuid, setgid or
+        sticky bit). A directory this call just created is set to 0700 whatever the umask; an
+        existing one is never changed. Anything else is ``StateUnusable``.
         """
         if not home or not os.path.isabs(home):
             raise StateUnusable("open")
         parent = os.path.join(home, ".local", "state")
         leaf = os.path.join(parent, "slack-notice")
+        fd = -1
         try:
             os.makedirs(parent, mode=0o700, exist_ok=True)
             try:
                 os.mkdir(leaf, 0o700)
+                os.chmod(leaf, 0o700)  # our own new dir: a restrictive umask must not lock us out
             except FileExistsError:
                 pass
             fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         except (OSError, ValueError):
-            raise StateUnusable("open") from None
+            fd = -1
+        if fd < 0:
+            raise StateUnusable("open")
+        reason = None
         try:
-            info = os.fstat(fd)
-            if info.st_uid != self.uid():
-                raise StateUnusable("owner")
-            if info.st_mode & 0o077:
-                raise StateUnusable("mode")
-        except StateUnusable:
-            os.close(fd)
+            try:
+                info = os.fstat(fd)
+                if info.st_uid != self.uid():
+                    reason = "owner"
+                elif stat.S_IMODE(info.st_mode) & 0o7077:
+                    reason = "mode"
+            except OSError:
+                reason = "open"
+        except BaseException:
+            self.close_fd(fd)
             raise
-        except OSError:
-            os.close(fd)
-            raise StateUnusable("open") from None
+        if reason is not None:
+            self.close_fd(fd)
+            raise StateUnusable(reason)
         return fd
 
     def open_state_file(self, dir_fd: int, name: str, *, append: bool = False) -> int:
         """Open ``name`` (a single path component) relative to ``dir_fd``; mode 0600 on create.
 
         ``O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`` (plus ``O_APPEND`` for the log) and an ``fstat``
-        check on the descriptor: a regular file owned by the user, one link, no group or other
-        permission. A FIFO, symlink, device, hardlinked or foreign file is ``StateUnusable``,
-        never a hang. Residual (same-user boundary): ``.local`` and ``.local/state`` are
-        followed if they are links; only the leaf is ``O_NOFOLLOW``. The leaf can be swapped
-        between ``mkdir`` and ``open`` by the same user (accepted); after the open every file
-        is relative to the descriptor.
+        check on the descriptor: a regular file owned by the user, one link, no permission bits
+        outside 0600 (no group or other access, no execute, setuid, setgid or sticky bit). A
+        FIFO, symlink, device, hardlinked or foreign file is ``StateUnusable``, never a hang.
+        A file this call just created (``O_CREAT | O_EXCL``) is set to 0600 whatever the umask;
+        an existing one is never changed. Residual (same-user boundary): ``.local`` and
+        ``.local/state`` are followed if they are links; only the leaf is ``O_NOFOLLOW``. The
+        leaf can be swapped between ``mkdir`` and ``open`` by the same user (accepted); after
+        the open every file is relative to the descriptor.
         """
         if not name or "/" in name or name in (".", "..") or "\0" in name:
             raise ValueError("state file name must be one plain path component")
-        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
         if append:
             flags |= os.O_APPEND
+        fd = -1
+        created = False
+        for _ in range(3):  # bounded: a file that keeps vanishing is unusable
+            try:
+                fd = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+                created = True
+                break
+            except FileExistsError:
+                pass
+            except OSError:
+                break
+            try:
+                fd = os.open(name, flags, dir_fd=dir_fd)
+                break
+            except FileNotFoundError:
+                continue
+            except OSError:
+                break
+        if fd < 0:
+            raise StateUnusable("open")
+        reason = None
         try:
-            fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
-        except OSError:
-            raise StateUnusable("open") from None
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                raise StateUnusable("not_regular")
-            # Beyond the interface's letter, in its spirit (conservative): a file with another
-            # owner, another link or group/other access is not ours to append to or lock.
-            if info.st_uid != self.uid():
-                raise StateUnusable("owner")
-            if info.st_nlink != 1:
-                raise StateUnusable("linked")
-            if info.st_mode & 0o077:
-                raise StateUnusable("mode")
-        except StateUnusable:
-            os.close(fd)
+            try:
+                if created:
+                    os.fchmod(fd, 0o600)
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    reason = "not_regular"
+                elif info.st_uid != self.uid():
+                    reason = "owner"
+                elif info.st_nlink != 1:
+                    reason = "linked"
+                elif stat.S_IMODE(info.st_mode) & 0o7177:
+                    reason = "mode"
+            except OSError:
+                reason = "open"
+        except BaseException:
+            self.close_fd(fd)
             raise
-        except OSError:
-            os.close(fd)
-            raise StateUnusable("open") from None
+        if reason is not None:
+            self.close_fd(fd)
+            raise StateUnusable(reason)
         return fd
 
     def close_fd(self, fd: int) -> None:

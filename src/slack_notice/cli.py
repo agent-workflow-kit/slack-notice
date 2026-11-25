@@ -264,6 +264,8 @@ class Context:
         Never called for ``send --dry-run --config`` (home is None, no state is used).
         """
         assert self.home is not None, "state directory requested without a home"
+        # todo(#28): close the StateDir (with-scope or close()) when wiring send; call state_dir()
+        # only after the dry-run exemption
         if self._state is None:
             self._state = StateDir(self.gateway, self.home, self.output.warning)
         return self._state

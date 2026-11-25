@@ -12,6 +12,7 @@ import os
 import signal
 import stat
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -248,8 +249,26 @@ def test_unusable_home_values(gw: FakeGateway, bad: str) -> None:
 # --- hostile files ----------------------------------------------
 
 
+def _alarm(_signum: int, _frame: object) -> None:
+    raise AssertionError("state-file open hung on a FIFO")
+
+
+@pytest.fixture
+def alarm() -> Iterator[None]:
+    """Fail (never hang) when a FIFO regression blocks the open for 5 seconds."""
+    previous = signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(5)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 @pytest.mark.parametrize("name", ["log.jsonl", "log.lock", "send.lock"])
-def test_fifo_returns_at_once_with_one_warning(gw: FakeGateway, home: Path, name: str) -> None:
+def test_fifo_returns_at_once_with_one_warning(
+    gw: FakeGateway, home: Path, name: str, alarm: None
+) -> None:
     leaf = make_state(home)
     os.mkfifo(leaf / name)
     lines = Lines()
@@ -261,7 +280,7 @@ def test_fifo_returns_at_once_with_one_warning(gw: FakeGateway, home: Path, name
     assert_one_warning(lines)
 
 
-def test_fifo_log_and_fifo_lock_still_one_warning(gw: FakeGateway, home: Path) -> None:
+def test_fifo_log_and_fifo_lock_still_one_warning(gw: FakeGateway, home: Path, alarm: None) -> None:
     leaf = make_state(home)
     os.mkfifo(leaf / "log.jsonl")
     os.mkfifo(leaf / "log.lock")
@@ -272,7 +291,7 @@ def test_fifo_log_and_fifo_lock_still_one_warning(gw: FakeGateway, home: Path) -
     assert_one_warning(lines)
 
 
-def test_a_bad_file_does_not_poison_the_others(gw: FakeGateway, home: Path) -> None:
+def test_a_bad_file_does_not_poison_the_others(gw: FakeGateway, home: Path, alarm: None) -> None:
     leaf = make_state(home)
     os.mkfifo(leaf / "log.jsonl")
     lines = Lines()
@@ -382,9 +401,7 @@ def test_file_with_wrong_owner_is_refused(home: Path) -> None:
     assert (leaf / "log.jsonl").read_text() == CANARY
 
 
-def test_existing_file_with_open_mode_is_refused_or_kept_private(
-    gw: FakeGateway, home: Path
-) -> None:
+def test_existing_file_with_open_mode_is_refused(gw: FakeGateway, home: Path) -> None:
     leaf = make_state(home)
     (leaf / "log.jsonl").write_text("")
     (leaf / "log.jsonl").chmod(0o644)
@@ -394,7 +411,9 @@ def test_existing_file_with_open_mode_is_refused_or_kept_private(
     assert_one_warning(lines)
 
 
-def test_no_descriptor_leaks_when_a_file_is_refused(gw: FakeGateway, home: Path) -> None:
+def test_no_descriptor_leaks_when_a_file_is_refused(
+    gw: FakeGateway, home: Path, alarm: None
+) -> None:
     leaf = make_state(home)
     os.mkfifo(leaf / "log.jsonl")
     before = len(os.listdir("/proc/self/fd"))
@@ -481,6 +500,215 @@ def test_context_state_dir_warns_through_output(gw: FakeGateway, home: Path) -> 
     assert_one_warning(err)
 
 
-def test_sigpipe_handler_untouched() -> None:
-    # The state code never installs a handler (a signal is the CLI's concern, issue #27).
-    assert signal.getsignal(signal.SIGPIPE) is not None
+# --- hardening (round 1) ----------------------------------------------
+
+
+def test_warning_text_is_pinned_and_documented() -> None:
+    assert STATE_WARNING == (
+        "slack-notice: the state directory or a state file cannot be used safely; "
+        "the log record or send spacing may be skipped"
+    )
+    doc = (Path(__file__).resolve().parent.parent / "docs" / "interface.md").read_text()
+    assert STATE_WARNING in doc
+
+
+def test_partial_failure_warns_with_the_fixed_text_only(gw: FakeGateway, home: Path) -> None:
+    leaf = make_state(home)
+    (leaf / "log.jsonl").write_text("")
+    (leaf / "log.jsonl").chmod(0o644)
+    lines = Lines()
+    with StateDir(gw, str(home), lines) as state:
+        assert state.open_file("log.jsonl", append=True) is None
+        fd = state.open_file("send.lock")
+        assert fd is not None
+        os.close(fd)
+    assert lines.lines == [STATE_WARNING]
+
+
+@pytest.mark.parametrize("mode", [0o4600, 0o2600, 0o1600, 0o700, 0o500, 0o610])
+def test_file_with_extra_mode_bits_is_refused(gw: FakeGateway, home: Path, mode: int) -> None:
+    leaf = make_state(home)
+    (leaf / "log.lock").write_text("")
+    (leaf / "log.lock").chmod(mode)
+    lines = Lines()
+    with StateDir(gw, str(home), lines) as state:
+        assert state.open_file("log.lock") is None
+    assert_one_warning(lines)
+
+
+@pytest.mark.parametrize("mode", [0o2700, 0o4700, 0o1700])
+def test_dir_with_special_mode_bits_is_refused(gw: FakeGateway, home: Path, mode: int) -> None:
+    make_state(home, mode)
+    lines = Lines()
+    with StateDir(gw, str(home), lines) as state:
+        assert state.open_file("log.lock") is None
+    assert_one_warning(lines)
+
+
+@pytest.mark.parametrize("mask", [0o277, 0o777])
+def test_umask_does_not_make_our_own_objects_unusable(
+    gw: FakeGateway, home: Path, mask: int
+) -> None:
+    parent = home / ".local" / "state"
+    parent.mkdir(parents=True, mode=0o700)
+    lines = Lines()
+    old = os.umask(mask)
+    try:
+        with StateDir(gw, str(home), lines) as state:
+            fd = state.open_file("log.lock")
+            assert fd is not None
+            os.close(fd)
+    finally:
+        os.umask(old)
+    assert lines.lines == []
+    assert stat.S_IMODE(state_path(home).stat().st_mode) == 0o700
+    assert stat.S_IMODE((state_path(home) / "log.lock").stat().st_mode) == 0o600
+
+
+def test_a_preexisting_directory_is_never_chmodded(gw: FakeGateway, home: Path) -> None:
+    make_state(home, 0o755)
+    lines = Lines()
+    with StateDir(gw, str(home), lines) as state:
+        assert state.open_file("log.lock") is None
+    assert stat.S_IMODE(state_path(home).stat().st_mode) == 0o755
+    assert_one_warning(lines)
+
+
+def test_a_preexisting_file_is_never_chmodded(gw: FakeGateway, home: Path) -> None:
+    leaf = make_state(home)
+    (leaf / "log.lock").write_text("")
+    (leaf / "log.lock").chmod(0o664)
+    with StateDir(gw, str(home), Lines()) as state:
+        assert state.open_file("log.lock") is None
+    assert stat.S_IMODE((leaf / "log.lock").stat().st_mode) == 0o664
+
+
+def test_fd_is_closed_on_base_exception_in_file_open(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_state(home)
+    gateway = SystemGateway()
+    dir_fd = gateway.open_state_dir(str(home))
+    real_fstat = os.fstat
+    try:
+        before = len(os.listdir("/proc/self/fd"))
+
+        def boom(fd: int) -> os.stat_result:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(os, "fstat", boom)
+        with pytest.raises(KeyboardInterrupt):
+            gateway.open_state_file(dir_fd, "log.lock")
+        monkeypatch.setattr(os, "fstat", real_fstat)
+        assert len(os.listdir("/proc/self/fd")) == before
+    finally:
+        monkeypatch.undo()
+        os.close(dir_fd)
+
+
+def test_fd_is_closed_on_base_exception_in_dir_open(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    make_state(home)
+    gateway = SystemGateway()
+    before = len(os.listdir("/proc/self/fd"))
+
+    def boom(fd: int) -> os.stat_result:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(os, "fstat", boom)
+    with pytest.raises(KeyboardInterrupt):
+        gateway.open_state_dir(str(home))
+    monkeypatch.undo()
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+def test_refusals_carry_no_exception_context(home: Path) -> None:
+    leaf = make_state(home)
+    gateway = SystemGateway()
+    blocked = home / "blocked"
+    (blocked / ".local" / "state").mkdir(parents=True, mode=0o700)
+    (blocked / ".local" / "state" / "slack-notice").write_text("")
+    with pytest.raises(StateUnusable) as dir_info:
+        gateway.open_state_dir(str(blocked))
+    assert dir_info.value.__context__ is None and dir_info.value.__cause__ is None
+    dir_fd = gateway.open_state_dir(str(home))
+    try:
+        (leaf / "t").symlink_to(leaf / "nothing")
+        os.mkfifo(leaf / "f")
+        (leaf / "m").write_text("")
+        (leaf / "m").chmod(0o644)
+        for name in ("t", "f", "m"):
+            with pytest.raises(StateUnusable) as info:
+                gateway.open_state_file(dir_fd, name)
+            assert info.value.__context__ is None and info.value.__cause__ is None
+    finally:
+        os.close(dir_fd)
+
+
+def test_refusal_survives_a_failing_close(
+    gw: FakeGateway, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    leaf = make_state(home)
+    (leaf / "log.lock").write_text("")
+    (leaf / "log.lock").chmod(0o644)
+    real_close = os.close
+
+    def failing_close(fd: int) -> None:
+        real_close(fd)
+        raise OSError(errno.EIO, "boom")
+
+    gateway = SystemGateway()
+    dir_fd = gateway.open_state_dir(str(home))
+    try:
+        monkeypatch.setattr(os, "close", failing_close)
+        with pytest.raises(StateUnusable):
+            gateway.open_state_file(dir_fd, "log.lock")
+    finally:
+        monkeypatch.undo()
+    # the directory refusal path as well
+    make_dir = home / "other"
+    make_dir.mkdir(mode=0o700)
+    (make_dir / ".local" / "state").mkdir(parents=True, mode=0o700)
+    (make_dir / ".local" / "state" / "slack-notice").mkdir(mode=0o755)
+    monkeypatch.setattr(os, "close", failing_close)
+    try:
+        with pytest.raises(StateUnusable):
+            gateway.open_state_dir(str(make_dir))
+    finally:
+        monkeypatch.undo()
+        os.close(dir_fd)
+
+
+def test_a_broken_warning_sink_does_not_break_open_file(gw: FakeGateway, home: Path) -> None:
+    make_state(home, 0o755)
+
+    def broken(line: str) -> None:
+        raise BrokenPipeError(errno.EPIPE, "closed")
+
+    with StateDir(gw, str(home), broken) as state:
+        assert state.open_file("log.lock") is None
+        assert state.open_file("log.lock") is None
+
+    def bad_value(line: str) -> None:
+        raise ValueError("I/O operation on closed file")
+
+    with StateDir(gw, str(home), bad_value) as state:
+        assert state.open_file("log.lock") is None
+
+
+def test_open_file_after_close_is_none_without_warning_or_reopen(
+    gw: FakeGateway, home: Path
+) -> None:
+    lines = Lines()
+    state = StateDir(gw, str(home), lines)
+    fd = state.open_file("log.lock")
+    assert fd is not None
+    os.close(fd)
+    state.close()
+    opens = gw.events.count("open_state_dir")
+    before = len(os.listdir("/proc/self/fd"))
+    assert state.open_file("log.lock") is None
+    assert len(os.listdir("/proc/self/fd")) == before
+    assert lines.lines == []
+    assert gw.events.count("open_state_dir") == opens

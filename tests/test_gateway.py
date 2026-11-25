@@ -1364,7 +1364,7 @@ def test_state_dir_under_a_file_is_unusable(gateway: Gateway, tmp_path: Path) ->
     with pytest.raises(StateUnusable) as info:
         gateway.open_state_dir(str(blocker))
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None
 
 
 def test_state_file_flags_and_mode(gateway: Gateway, tmp_path: Path) -> None:
