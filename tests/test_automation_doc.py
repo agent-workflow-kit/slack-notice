@@ -39,7 +39,6 @@ README = (ROOT / "README.md").read_text(encoding="utf-8")
 DESIGN = (ROOT / "docs" / "design.md").read_text(encoding="utf-8")
 MARKERS = ("test-cron", "test-sh", "test-py", "golden", "manual")
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
-MARK = re.compile(r"<!-- ([a-z-]+)(?: (\S+))? -->")
 FLAT = " ".join(DOC.split())
 PYTHON3 = Path(sys.executable)
 SPAWNED: list[subprocess.Popen[bytes]] = []
@@ -52,6 +51,19 @@ class Block:
     lang: str
     text: str
     line: int
+
+
+def parse_marker(text: str) -> tuple[str, str] | None:
+    """Return (name, arg) for a line like ``<!-- name -->`` or ``<!-- name arg -->``, else None."""
+    if not (text.startswith("<!-- ") and text.endswith(" -->")):
+        return None
+    inner = text[len("<!-- ") : -len(" -->")]
+    name, separator, arg = inner.partition(" ")
+    if not re.fullmatch(r"[a-z-]+", name):
+        return None
+    if separator and not re.fullmatch(r"\S+", arg):
+        return None
+    return name, arg
 
 
 def blocks() -> list[Block]:
@@ -70,11 +82,11 @@ def blocks() -> list[Block]:
             previous = (
                 lines[start - 2].strip() if start > 1 and not lines[start - 1].strip() else ""
             )
-            m = MARK.fullmatch(previous)
+            parsed = parse_marker(previous)
             found.append(
                 Block(
-                    m.group(1) if m else "",
-                    (m.group(2) or "") if m else "",
+                    parsed[0] if parsed else "",
+                    parsed[1] if parsed else "",
                     lang,
                     "\n".join(body) + "\n",
                     start + 1,
