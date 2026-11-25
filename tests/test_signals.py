@@ -596,6 +596,7 @@ def test_the_gate_states_are_those_of_the_spec() -> None:
 def test_without_restore_a_noop_handler_stays_so_a_later_signal_changes_nothing() -> None:
     before = {s: signal.getsignal(s) for s in SIGNALS}
     gate = _SignalGate()
+    gate.commit()  # an uncommitted gate records a late signal (next tests)
     try:
         with _exit_on_signal(gate, restore=False):
             pass
@@ -609,6 +610,52 @@ def test_without_restore_a_noop_handler_stays_so_a_later_signal_changes_nothing(
     finally:
         for sig, handler in before.items():
             signal.signal(sig, handler)
+
+
+@pytest.mark.parametrize("sig", ALL)
+def test_without_restore_a_late_signal_on_an_uncommitted_gate_is_recorded(
+    sig: signal.Signals,
+) -> None:
+    before = {s: signal.getsignal(s) for s in SIGNALS}
+    gate = _SignalGate()
+    try:
+        with _exit_on_signal(gate, restore=False):
+            pass
+        kill(sig)
+        time.sleep(0.02)
+        assert gate.fired == sig  # main turns this into 128 + sig after the with block
+    finally:
+        for s, handler in before.items():
+            signal.signal(s, handler)
+
+
+@pytest.mark.parametrize("sig", ALL)
+def test_without_restore_a_late_signal_on_a_committed_gate_changes_nothing(
+    sig: signal.Signals,
+) -> None:
+    before = {s: signal.getsignal(s) for s in SIGNALS}
+    gate = _SignalGate()
+    gate.commit()
+    try:
+        with _exit_on_signal(gate, restore=False):
+            pass
+        kill(sig)
+        time.sleep(0.02)
+        assert gate.fired is None
+    finally:
+        for s, handler in before.items():
+            signal.signal(s, handler)
+
+
+@pytest.mark.parametrize("sig", ALL)
+def test_a_committed_gate_that_is_not_armed_ignores_every_signal(sig: signal.Signals) -> None:
+    gate = _SignalGate()
+    gate.commit()
+    with _exit_on_signal(gate):
+        handler = signal.getsignal(sig)
+        assert callable(handler)
+        handler(sig, None)  # no raise
+    assert gate.fired is None
 
 
 @pytest.mark.parametrize("argv", [None, ["send"]])
@@ -721,8 +768,16 @@ def test_a_signal_after_acquire_before_the_worker_connects_is_network_error_time
     sent = mimic_send(gw, state, attempts=(Attempt(),), after_acquire=lambda: kill(sig))
     error = assert_one_result(sent, code="network_error", unknown=False, outcome="failed")
     assert error["details"]["timeout"] is True
-    assert "post" not in gw.events
+    # the worker may still open (and close) a connection; nothing is written or read on it
+    assert "post" not in gw.events and "getresponse" not in gw.events
     fds_and_lock(home)()
+
+
+def test_the_control_run_without_a_signal_records_the_connection(
+    gw: FakeGateway, state: Any
+) -> None:
+    mimic_send(gw, state, attempts=(Attempt(),))
+    assert "https_connection" in gw.events and "post" in gw.events  # what the signal run lacks
 
 
 @pytest.mark.parametrize("sig", ALL)

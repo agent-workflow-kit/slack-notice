@@ -564,9 +564,9 @@ def _set_disposition(number: int, disposition: Any) -> None:
 def _exit_on_signal(gate: _SignalGate, restore: bool = True) -> Iterator[None]:
     """SIGTERM, SIGINT and SIGHUP are handled once; the old handlers come back after.
 
-    ``restore=False`` (the process entry) installs a no-op handler after the block instead, so a
-    signal while the result is flushed and the interpreter ends changes nothing (no traceback,
-    no death by the default disposition).
+    ``restore=False`` (the process entry) installs a non-raising handler after the block instead:
+    once the gate is committed a signal changes nothing (no traceback, no death by the default
+    disposition); before that it only records ``gate.fired``, which ``main`` turns into 128+N.
 
     Before step 5 the first signal raises ``_Signalled`` (a ``BaseException``: no ``except
     Exception`` swallows it) and sets ``gate.fired``; every later one returns, so the first wins.
@@ -594,6 +594,13 @@ def _exit_on_signal(gate: _SignalGate, restore: bool = True) -> Iterator[None]:
         # disposition is changed.
         raise _Signalled(number)
 
+    def record_late(number: int, _frame: object) -> None:
+        # The handler left by ``restore=False``: it never raises, but a signal that comes after
+        # the block and before the result is committed is recorded; ``main`` turns it into
+        # 128+N once the restore loop has finished.
+        if not gate.committed and gate.fired is None:
+            gate.fired = number
+
     saved: dict[int, Any] = {}
     try:
         for number in SIGNALS:
@@ -606,7 +613,7 @@ def _exit_on_signal(gate: _SignalGate, restore: bool = True) -> Iterator[None]:
         pending: BaseException | None = None
         for number, previous in saved.items():
             target = (
-                _ignore_signal if not restore else signal.SIG_DFL if previous is None else previous
+                record_late if not restore else signal.SIG_DFL if previous is None else previous
             )
             try:
                 _set_disposition(number, target)
@@ -614,10 +621,6 @@ def _exit_on_signal(gate: _SignalGate, restore: bool = True) -> Iterator[None]:
                 pending = pending or error
         if pending is not None:
             raise pending
-
-
-def _ignore_signal(_number: int, _frame: object) -> None:
-    """The handler left after the process entry's run: a later signal changes nothing."""
 
 
 # --- dispatch ------------------------------------------------------------------------------------
