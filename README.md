@@ -36,7 +36,7 @@ uv tool install git+https://github.com/agent-workflow-kit/slack-notice
 2. Give the trigger one text variable named `body` (if you choose another name, set `body_variable` in the config).
 3. Add a step that sends a message to the person or channel you want, with the message text set to that variable.
 4. Publish the workflow and copy the webhook URL.
-5. Put the URL in an environment variable, by default `SLACK_WEBHOOK` (the name is the config key `webhook_env`). Treat it as a secret: create the env file in a subshell with `umask 077`, never truncate an existing one, and load it with `set -a` (or keep the `export`) so the variable reaches the tool. slack-notice never reads files or shell startup scripts to find it.
+5. Put the URL in an environment variable, by default `SLACK_WEBHOOK` (the name is the config key `webhook_env`). Treat it as a secret (surrounding ASCII whitespace, such as a trailing newline from an env file, is ignored; a value longer than 1024 characters is refused): create the env file in a subshell with `umask 077`, never truncate an existing one, and load it with `set -a` (or keep the `export`) so the variable reaches the tool. slack-notice never reads files or shell startup scripts to find it.
 6. Run `slack-notice validate` to check the config and the credential. Then run `slack-notice validate --test-message` once by hand and look in Slack. Slack accepts a request with a wrong variable name and drops it silently, so only you can confirm the message arrived. Automation never calls `--test-message`.
 
 ```sh
