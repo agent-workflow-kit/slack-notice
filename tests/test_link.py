@@ -220,6 +220,12 @@ _BANNED_NAMES = {
     "urldefrag",
     "parse_url",
     "__import__",
+    "import_module",
+    "reload",
+    "exec",
+    "eval",
+    "globals",
+    "compile",
 }
 
 
@@ -243,7 +249,13 @@ def url_parser_uses(source: str) -> list[str]:
                 found.append(module)
         elif isinstance(node, ast.Name | ast.Attribute):
             name = node.id if isinstance(node, ast.Name) else node.attr
-            if name in _BANNED_NAMES:
+            is_re_compile = (
+                isinstance(node, ast.Attribute)
+                and node.attr == "compile"
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "re"
+            )  # re.compile builds a regex; it cannot run code
+            if name in _BANNED_NAMES and not is_re_compile:
                 found.append(name)
         elif isinstance(node, ast.Call):
             func = node.func
@@ -271,6 +283,16 @@ def url_parser_uses(source: str) -> list[str]:
         "x = getattr(m, name)",
         "name = 'urllib.parse'",
         "m.urlparse(x)",
+        "import importlib.metadata\nimportlib.import_module('url'+'lib.parse')",
+        "from importlib import import_module\nimport_module('x')",
+        "import importlib.metadata as im\nim.reload(m)",
+        "exec('import urllib.parse')",
+        "eval('1')",
+        "globals()['__imp'+'ort__']('x')",
+        "m.globals()",
+        "compile('x', 'f', 'exec')",
+        "import re as r\nr.compile('x')\nm.compile('x')",
+        "builtins.exec(code)",
     ],
 )
 def test_the_url_parser_check_flags_evasive_code(snippet: str) -> None:
