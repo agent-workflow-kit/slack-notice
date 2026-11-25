@@ -4,7 +4,8 @@ Every other module reaches the network, the clock (``monotonic``, ``wall_time``,
 name resolution, the password database (``home_dir``, ``uid``, ``login_name``), the home
 directory check (``is_directory``), input sources
 (``read_source``), CA files, config-style files (``read_regular_file``) and state files
-(``open_state_dir``, ``open_state_file``, ``try_lock``, ``unlock``) through the ``Gateway``
+(``open_state_dir``, ``open_state_file``, ``try_lock``, ``unlock``), config directory listings
+(``list_directory``), display paths (``absolute_path``) through the ``Gateway``
 protocol defined here, so tests can pass a fake (issue #5). A test (``tests/test_gateway.py``)
 fails if any other module imports ``urllib``, ``http``, ``time``, ``fcntl`` or ``subprocess``
 or reaches them dynamically. Failures that callers must tell apart are ``NoUsableCA``,
@@ -206,6 +207,19 @@ class Gateway(Protocol):
     def unlock(self, fd: int) -> None: ...
 
     def read_regular_file(self, path: str | os.PathLike[str], max_bytes: int) -> bytes: ...
+
+    def list_directory(self, path: str) -> list[str]:
+        """Entry names of the directory ``path`` (a link to one is followed), in no order.
+
+        Raises ``OSError`` (``FileNotFoundError`` for a missing one, ``NotADirectoryError`` for a
+        file) and ``ValueError`` (a NUL). Only names are returned: nothing is opened or read.
+        """
+        ...
+
+    def absolute_path(self, path: str) -> str:
+        """``path`` made absolute for display: unchanged when it is, else joined to the working
+        directory (or prefixed ``./`` when that is unavailable). Not normalised, not resolved."""
+        ...
 
 
 # --- failure classification (by exception class; pure) ---------------------------------------
@@ -554,3 +568,14 @@ class SystemGateway:
             raise ValueError("file too large")
         finally:
             os.close(fd)
+
+    def list_directory(self, path: str) -> list[str]:
+        return os.listdir(path)
+
+    def absolute_path(self, path: str) -> str:
+        if os.path.isabs(path):
+            return path
+        try:
+            return os.path.join(os.getcwd(), path)
+        except OSError:
+            return os.path.join(".", path)

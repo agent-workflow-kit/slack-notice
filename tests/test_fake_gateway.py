@@ -1373,6 +1373,17 @@ def test_gateway_resolve_hooks_do_not_affect_connect(gw: FakeGateway) -> None:
     assert "resolve" not in gw.events
 
 
+def test_config_file_and_directory_hooks_raise_for_their_path(gw: FakeGateway) -> None:
+    gw.file_errors["/x/c.yaml"] = PermissionError(13, "denied")
+    gw.directory_errors["/x/config.d"] = PermissionError(13, "denied")
+    with pytest.raises(PermissionError):
+        gw.read_regular_file("/x/c.yaml", 10)
+    with pytest.raises(PermissionError):
+        gw.list_directory("/x/config.d")
+    assert gw.events[-2:] == ["read_regular_file", "list_directory"]
+    assert gw.absolute_path("/x") == "/x"
+
+
 # --- the public surface is the real gateway's ----------------------------------------------------
 
 
