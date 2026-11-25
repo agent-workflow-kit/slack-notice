@@ -24,8 +24,8 @@ Implements [interface.md](interface.md) and [design.md](design.md). The issues f
 | `payload.py` | 2 | Input reading, validation, sanitizer, link rule. |
 | `render.py` | 2 | Body layout and cuts. |
 | `spacing.py` | 3 | Send lock and 1 s spacing. |
-| `webhook.py` | 3 | URL allowlist, one attempt (`post_once`, `AttemptResult`, `Phase`, `Failure`; #23), response mapping, retries. |
-| `deadline.py` | 3 | The deadline (#25): `Deadline` (three-state gate and result slot under one lock, daemon worker, wait in slices), `attempt_work`, `conclude` (print and flush in a daemon thread bounded to 1 s, then the log step, then `gateway.exit_now`). |
+| `webhook.py` | 3 | URL allowlist, one attempt (`post_once`, `AttemptResult`, `Phase`, `Failure`; #23), response mapping. |
+| `deadline.py` | 3 | The deadline (#25): `Deadline` (three-state gate and result slot under one lock, daemon worker, wait in slices), `attempt_work` (the retry loop, #26), `conclude` (print and flush in a daemon thread bounded to 1 s, then the log step, then `gateway.exit_now`). |
 
 ## Stage 0: Scaffold and gateway
 

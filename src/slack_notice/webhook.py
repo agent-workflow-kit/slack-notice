@@ -11,9 +11,9 @@ written exactly once through the injected gateway connection, the response statu
 4 KiB of body are read, the connection is closed on every path, and the facts come back as an
 ``AttemptResult`` (no exception object, no header, no host, no path). Mapping them to exit codes
 is ``map_attempt`` (#24, below). The gate, the daemon worker and the hard exit are
-``slack_notice.deadline`` (#25); retries are #26.
+``slack_notice.deadline`` (#25).
 
-TODO(#26): implement retries.
+The retry loop is ``slack_notice.deadline.attempt_work`` (#26).
 TODO(#28): call ``read_webhook`` at send step 5 and map ``CredentialInvalid`` to exit 12
 ``credential_invalid`` with ``details.env``.
 """

@@ -193,6 +193,9 @@ class Reply:
     # ConnectionResetError, or as IncompleteRead after a partial body.
     body_error: BaseException | None = None
     body_error_after: int = 0
+    # Extra response headers (test-only): they lengthen the head; the Response protocol never
+    # exposes them, which is what a test of an ignored header relies on.
+    headers: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         total = len(self.body) + self.truncated_by
@@ -439,7 +442,9 @@ class FakeConnection:
             if reply.framing == "chunked"
             else f"Content-Length: {len(reply.body)}\r\n"
         )
-        head_length = len(f"HTTP/1.1 {reply.status} X\r\n{framing_header}Connection: close\r\n\r\n")
+        extra = "".join(f"{name}: {value}\r\n" for name, value in reply.headers)
+        head = f"HTTP/1.1 {reply.status} X\r\n{framing_header}{extra}Connection: close\r\n\r\n"
+        head_length = len(head.encode())
         head_bytes = head_length if reply.head_stall_after is None else reply.head_stall_after
         if reply.head_trickle:
             for _ in range(head_bytes):
@@ -453,9 +458,8 @@ class FakeConnection:
     def settimeout(self, seconds: float) -> None:
         """As the real connection: it updates ``timeout``, and the live socket only before the
         response exists (afterwards the response owns the socket and keeps its timeout)."""
-        # todo(#26): the real connection freezes the socket timeout only for a will-close
-        # response; for a keep-alive reply ``settimeout`` still reaches the body read. The fake
-        # always freezes it. Per-operation timeouts (#26) must model the difference.
+        # The real connection freezes the socket timeout only for a will-close response; every
+        # request here sends ``Connection: close``, so the fake always freezing it is faithful.
         self.timeout = seconds
         if self._connected and not self.closed and not self._responded:
             _validate_socket_timeout(seconds)
