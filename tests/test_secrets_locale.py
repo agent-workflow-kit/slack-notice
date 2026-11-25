@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from slack_notice import cli
+from slack_notice.gateway import NoUsableCA, SystemGateway
 from tests.fake_gateway import FakeGateway
 from tests.send_harness import go
 from tests.test_secrets_env import CASES, Recording, decoys, gateway_in
@@ -79,6 +80,24 @@ def test_the_code_never_touches_os_environ_during_a_send(
     sent = go(["send", *flags, "--stdin-json"], gateway, stdin=stdin, env=env)
     assert spy.log == [], (case, spy.log)
     assert sent.code in (0, 12, 20)
+
+
+def test_the_ca_paths_and_the_tls_context_never_touch_os_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ssl.get_default_verify_paths`` reads SSL_CERT_FILE and SSL_CERT_DIR through os.environ;
+    the compiled defaults are taken without it. Nothing connects: only a context is built."""
+    spy = RecordingEnviron({"SSL_CERT_FILE": "/nowhere/f", "SSL_CERT_DIR": "/nowhere/d"})
+    monkeypatch.setattr(os, "environ", spy)
+    gateway = SystemGateway()
+    candidates = gateway.ca_candidates()
+    try:
+        gateway.tls_context()
+    except NoUsableCA:
+        pass  # a host without any bundle: still no environment read
+    assert spy.log == []
+    assert "/nowhere/f" not in (candidates.cafile, candidates.capath)
+    assert "/nowhere/d" not in (candidates.cafile, candidates.capath)
 
 
 def test_the_recording_environ_can_see_a_read(monkeypatch: pytest.MonkeyPatch) -> None:

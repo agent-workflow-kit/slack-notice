@@ -29,6 +29,7 @@ Hard rules, enforced by tests:
 
 from __future__ import annotations
 
+import _ssl  # pyright: ignore[reportMissingModuleSource]
 import errno
 import fcntl
 import http.client
@@ -599,12 +600,10 @@ class SystemGateway:
                 return SourceRead(b"".join(chunks)[:max_bytes], too_large=True)
 
     def ca_candidates(self) -> CaCandidates:
-        # ``openssl_cafile`` and ``openssl_capath`` are the compiled defaults; ``cafile`` and
-        # ``capath`` on the same object would honour SSL_CERT_FILE and SSL_CERT_DIR.
-        paths = ssl.get_default_verify_paths()
-        return CaCandidates(
-            paths.openssl_cafile or None, paths.openssl_capath or None, CA_FALLBACK_FILES
-        )
+        # The compiled defaults straight from the C module: ``ssl.get_default_verify_paths``
+        # looks SSL_CERT_FILE and SSL_CERT_DIR up in ``os.environ`` and no variable is read.
+        _env_cafile, cafile, _env_capath, capath = _ssl.get_default_verify_paths()
+        return CaCandidates(cafile or None, capath or None, CA_FALLBACK_FILES)
 
     def tls_context(self) -> ssl.SSLContext:
         return build_tls_context(self.ca_candidates())
