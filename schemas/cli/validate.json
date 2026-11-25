@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/cli/validate.json",
   "title": "validate --json output",
-  "description": "Printed by validate when the config loads (an unloadable config prints the error envelope and exits 2). validate never prompts. Checks run in order (config, credential, test_message) and a failed check ends the run, so ok is true only when every printed check is ok. limits is always present in this document (the config loaded) and is absent from the error envelope and from {outcome: disabled}. ok false is printed with the exit code of the failing check. Plain validate of a disabled tool runs its checks and reports enabled false. With --test-message on a disabled tool nothing is sent, no check runs and the document is {outcome: disabled} (exit 22), as in send.json. Delivery of a test message is not observable: a human must look in Slack. The checks array is a prefix of config, credential, test_message (never empty, each at most once, in that order) and only its last check may be ok false.",
+  "description": "Printed by validate when the config loads (an unloadable config prints the error envelope and exits 2). validate never prompts. Checks run in order (config, credential, test_message) and a failed check ends the run, so ok is true only when every printed check is ok. limits is present in every document that has checks and is absent from the error envelope and from {outcome: disabled}. ok false is printed with the exit code of the failing check. Plain validate of a disabled tool runs its checks and reports enabled false. With --test-message on a disabled tool nothing is sent, no check runs and the document is {outcome: disabled} (exit 22), as in send.json. Delivery of a test message is not observable: a human must look in Slack. The checks array is a prefix of config, credential, test_message (never empty, each at most once, in that order) and only its last check may be ok false.",
   "oneOf": [
     {
       "type": "object",
@@ -163,7 +163,7 @@
   "$defs": {
     "limits": {
       "type": "object",
-      "description": "The effective limits of a send: the loaded config over the defaults. Present whenever the config loaded, whatever the checks say.",
+      "description": "The effective limits of a send: the loaded config over the defaults. Present in every document that has checks, whatever the checks say.",
       "properties": {
         "max_chars": {
           "type": "integer",

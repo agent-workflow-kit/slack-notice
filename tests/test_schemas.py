@@ -270,6 +270,19 @@ def test_config_duration_matches_the_shared_definition() -> None:
     assert own == shared
 
 
+def test_validate_limits_pins_match_the_config_schema_and_loader() -> None:
+    # validate.json repeats the config bounds; nothing else ties the copies together.
+    from slack_notice.config import DURATION_RANGES
+
+    pins = load_schema("cli/validate")["$defs"]["limits"]["properties"]
+    config = load_schema("config")["properties"]
+    for bound in ("minimum", "maximum"):
+        assert pins["max_chars"][bound] == config["max_chars"][bound]
+    low, high = DURATION_RANGES["timeout"]
+    assert (pins["timeout_s"]["minimum"], pins["timeout_s"]["maximum"]) == (low, high)
+    assert f"{low}s to {high}s" in config["timeout"]["description"]
+
+
 # The harness for real tool output.
 
 
