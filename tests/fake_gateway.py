@@ -471,8 +471,10 @@ class FakeGateway(SystemGateway):
         login_name: str | None = "tester",
         home_error: bool = False,
         wall_start: float = 1_700_000_000.0,
+        environment: dict[str, str] | None = None,
     ) -> None:
         self._home = home
+        self._environment = {} if environment is None else dict(environment)
         self._uid = os.getuid() if uid is None else uid
         self._login_name = login_name
         self._home_error = home_error
@@ -614,6 +616,9 @@ class FakeGateway(SystemGateway):
 
     def uid(self) -> int:
         return self._uid
+
+    def environ(self) -> dict[str, str]:
+        return dict(self._environment)
 
     def login_name(self) -> str | None:
         return self._login_name

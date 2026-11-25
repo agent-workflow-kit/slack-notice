@@ -1627,4 +1627,12 @@ def test_no_environment_variable_exists_only_for_tests() -> None:
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 assert not suspicious.match(node.value), f"{path.name}: {node.value}"
             if isinstance(node, ast.Attribute) and node.attr in {"environ", "getenv", "putenv"}:
-                assert path.name != "gateway.py", f"gateway.py reads the environment ({node.attr})"
+                # The gateway's one `environ()` hands the environment to the CLI, once.
+                allowed = path.name == "gateway.py" and node.attr == "environ"
+                assert path.name != "gateway.py" or allowed, f"gateway.py reads {node.attr}"
+    gateway_reads = [
+        n
+        for n in ast.walk(ast.parse((SRC / "gateway.py").read_text()))
+        if isinstance(n, ast.Attribute) and n.attr in {"environ", "getenv", "putenv"}
+    ]
+    assert len(gateway_reads) == 1

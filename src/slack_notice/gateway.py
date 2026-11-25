@@ -11,7 +11,9 @@ or reaches them dynamically. Failures that callers must tell apart are ``NoUsabl
 
 Hard rules, enforced by tests:
 
-- No code here reads the environment. Proxy variables, ``SSL_CERT_FILE``, ``SSL_CERT_DIR``,
+- No code here consults the environment. The one exception is ``environ()``, which only hands
+  a copy of the process environment to the CLI (the only reader of one variable, the one that
+  config names for the credential). Proxy variables, ``SSL_CERT_FILE``, ``SSL_CERT_DIR``,
   ``HOME`` and ``XDG_*`` are never consulted; the home directory comes from the password
   database and trust comes from the compiled OpenSSL defaults (or fixed fallback files).
 - ``urllib`` is not used: it reads proxy and CA variables and follows redirects.
@@ -165,6 +167,10 @@ class Gateway(Protocol):
         ...
 
     def uid(self) -> int: ...
+
+    def environ(self) -> dict[str, str]:
+        """A copy of the process environment: the CLI default for ``env`` (not consulted here)."""
+        ...
 
     def login_name(self) -> str | None:
         """``pw_name`` of the current uid, or ``None`` when there is no entry."""
@@ -371,6 +377,9 @@ class SystemGateway:
 
     def uid(self) -> int:
         return os.getuid()
+
+    def environ(self) -> dict[str, str]:
+        return dict(os.environ)
 
     def login_name(self) -> str | None:
         try:
