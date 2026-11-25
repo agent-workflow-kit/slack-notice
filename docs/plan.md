@@ -4,7 +4,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). The issues f
 
 ## Conventions for every stage
 
-- **Gateway boundary.** All HTTP (`http.client`), TLS context, clock and lock-file access goes through `src/slack_notice/gateway.py`; modules never import `urllib`, `http.client`, `time` or `fcntl` directly. Tests substitute a fake gateway.
+- **Gateway boundary.** All HTTP (`http.client`), TLS context, clock and lock-file access goes through `src/slack_notice/gateway.py`; modules never import `urllib`, `http`, `time`, `fcntl` or `subprocess` directly. Tests substitute a fake gateway.
 - **Fake gateway.** Process tests call `cli.main(argv, env, gateway)` with a fake gateway in-process, because the URL must be on `hooks.slack.com` and verification cannot be disabled; no test-only environment seam is allowed. The fake gateway supplies name resolution, the monotonic clock, the home directory and uid, input reading, state-directory access hooks where a test needs a hostile path, the CA path candidates, and a response script (each row of the interface's Webhook edge table, including a 200 with a wrong body, a 3xx and a 5xx), a delay, a stalled name resolution, a stall after the first byte, a trickled response, a TLS failure and a post-write failure. There are no real-socket tests. There are no sibling tools to pin.
 - **Process and live split.** Only the `live` tests (pytest marker, never in CI) touch the network: they post to the maintainer's own workflow and are listed in the live-verification issue.
 - **Golden files.** `--json` outputs, rendered bodies and log records have golden files; a golden hash test (fixed input, expected `message_sha256`) and a golden serialization test (`ensure_ascii=False`, compact separators, key order); schemas have positive and negative samples.
@@ -17,7 +17,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). The issues f
 
 | Module | Stage | Responsibility |
 |---|---|---|
-| `gateway.py` | 0 | HTTP, TLS context, clock, name resolution, home directory and uid, input reading, CA path candidates, state files. |
+| `gateway.py` | 0 | HTTP, TLS context, clock, name resolution, home directory and uid, input reading, CA path candidates, state files; also `wall_time`, `sleep`, `login_name`, `read_regular_file`, `try_lock`, `unlock` and the `StateUnusable` and `NotRegularFile` errors. |
 | `cli.py` | 0, 3, 4 | Parsing, dispatch, exit codes, output. |
 | `config.py` | 1 | Config, drop-ins, YAML, durations. |
 | `log.py` | 1 | State directory, log records and rotation. |
