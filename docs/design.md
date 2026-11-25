@@ -63,7 +63,7 @@ Verified in design (private spikes, 2026-11-17; the user's own workflow, test me
 | Destination | The workflow app's own conversation; workflow failures post to the workflow owner. |
 | Duplicates | A plain retry sends twice. |
 
-Still to verify (live tests in the plan, conservative defaults until then):
+Still to verify (live tests in the plan, conservative defaults until then; the suite and how to run it are in [live-testing.md](live-testing.md)):
 
 | Id | Claim | Conservative default |
 |---|---|---|
