@@ -49,7 +49,9 @@ class CredentialInvalid(Exception):  # noqa: N818
 class Webhook:
     """A validated destination. ``path`` is the secret. It is kept in a slot (no ``__dict__``),
     left out of ``repr`` (so of ``str``, ``format`` and pytest's failure output), and the object
-    cannot be pickled or copied (``__reduce__`` raises) and is not a dataclass (no ``asdict``).
+    cannot be pickled or copied (``__reduce__``, ``__reduce_ex__`` and ``__getstate__`` raise),
+    cannot be re-initialised (calling ``__init__`` again raises ``AttributeError``) and is not a
+    dataclass (no ``asdict``).
     ``host`` and ``port`` are fixed class constants, not constructor arguments. The constructor
     re-validates the path against the path part of the grammar."""
 
@@ -61,7 +63,12 @@ class Webhook:
         # The check runs without an except block, so the error holds no context and no value.
         if type(path) is not str or _PATH.fullmatch(path) is None:
             raise ValueError("not a workflow trigger path")
-        object.__setattr__(self, "_path", path)
+        try:
+            object.__getattribute__(self, "_path")
+        except AttributeError:
+            object.__setattr__(self, "_path", path)
+        else:
+            raise AttributeError("Webhook is immutable")
 
     @property
     def path(self) -> str:
@@ -83,6 +90,9 @@ class Webhook:
 
     def __hash__(self) -> int:
         return hash(self._path)
+
+    def __getstate__(self) -> NoReturn:
+        raise TypeError("Webhook cannot be pickled or copied")
 
     def __reduce__(self) -> NoReturn:
         raise TypeError("Webhook cannot be pickled or copied")

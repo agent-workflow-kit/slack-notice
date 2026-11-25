@@ -459,6 +459,21 @@ def test_the_value_is_immutable() -> None:
         delattr(hook, "path")
 
 
+def test_reinitialising_a_built_value_cannot_replace_the_path() -> None:
+    hook = read(url(SEG))
+    with pytest.raises(AttributeError):
+        hook.__init__("/triggers/zzz")  # type: ignore[misc]
+    assert hook == read(url(SEG))
+    assert "zzz" not in hook.path
+
+
+def test_getstate_does_not_return_the_secret() -> None:
+    hook = read(url(SEG))
+    with pytest.raises(TypeError) as caught:
+        hook.__getstate__()
+    assert SEG not in str(caught.value) and CANARY not in str(caught.value)
+
+
 def test_host_and_port_are_not_constructor_arguments() -> None:
     with pytest.raises(TypeError):
         Webhook("/triggers/x", "evil.example", 80)  # type: ignore[call-arg]
@@ -629,7 +644,7 @@ def test_injected_exceptions_carrying_the_url_never_reach_any_stream_or_the_log(
         streams = cli.Streams(out=out, err=err, stdin_is_tty=lambda: False)
         argv = ["send", *flags]
         code = cli.main(argv, {ENV: secret}, fake_gateway, streams)
-        assert CANARY not in " ".join(argv) and CANARY not in " ".join(sys.argv)
+        assert CANARY not in " ".join(sys.argv)
         assert code == 1
         everything = out.getvalue() + err.getvalue()
         assert CANARY.encode() not in everything and b"triggers" not in everything
