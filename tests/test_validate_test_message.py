@@ -105,6 +105,13 @@ def test_the_send_is_logged_like_a_send(fake_gateway: FakeGateway) -> None:
     )
 
 
+def pin_clock_after_stamp(gateway: FakeGateway, lock: Path) -> None:
+    """Freeze the wall clock 0.25 s after the lock stamp, so the spacing wait is exactly 0.75 s
+    however much real time the first run took."""
+    stamp = lock.stat().st_mtime
+    gateway.wall_time = lambda: stamp + 0.25  # type: ignore[method-assign]
+
+
 def test_the_send_lock_is_stamped_and_a_second_run_waits_out_the_spacing(
     fake_gateway: FakeGateway,
 ) -> None:
@@ -113,9 +120,10 @@ def test_the_send_lock_is_stamped_and_a_second_run_waits_out_the_spacing(
     lock = state_path(fake_gateway) / "send.lock"
     assert lock.stat().st_size == 1 and fake_gateway.events.count("set_mtime") == 1
     waited = sleeps(fake_gateway)
+    pin_clock_after_stamp(fake_gateway, lock)
     second = run(VT, fake_gateway)
     assert (first.code, second.code) == (0, 0) and waited == 0
-    assert 0.9 < sleeps(fake_gateway) - waited <= 1.0
+    assert sleeps(fake_gateway) - waited == pytest.approx(0.75)
     assert [r["outcome"] for r in second.records] == ["sent", "sent"]
 
 
@@ -123,8 +131,9 @@ def test_a_test_message_and_a_send_space_each_other(fake_gateway: FakeGateway) -
     fake_gateway.script(OK, OK)
     assert run(["send", "--message", "hi"], fake_gateway).code == 0
     waited = sleeps(fake_gateway)
+    pin_clock_after_stamp(fake_gateway, state_path(fake_gateway) / "send.lock")
     assert run(VT, fake_gateway).code == 0
-    assert 0.9 < sleeps(fake_gateway) - waited <= 1.0
+    assert sleeps(fake_gateway) - waited == pytest.approx(0.75)
 
 
 def test_dry_run_has_no_effect_on_validate(fake_gateway: FakeGateway) -> None:
