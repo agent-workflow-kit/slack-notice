@@ -182,8 +182,8 @@ def test_a_huge_single_line_within_the_cap_parses() -> None:
     assert len(payload.decode_notification(data)["message"]) == CAP - 20
 
 
-def test_a_lone_surrogate_escape_is_left_to_the_sanitizer() -> None:
-    # TODO(#17) owns the surrogate rule for decoded strings; the parser passes them on.
+def test_a_lone_surrogate_escape_is_left_to_validation() -> None:
+    # validate_notification (#17) refuses it with a pointer; the parser passes it on.
     assert payload.decode_notification(b'{"message":"\\ud800"}')["message"] == "\ud800"
 
 

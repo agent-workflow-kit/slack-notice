@@ -42,7 +42,7 @@ def refused(value: object) -> payload.FieldRefused:
         {"title": "t", "message": "m", "level": "error", "link": "https://a.example/"},
         {"title": "", "message": ""},  # emptiness is the sanitizer's (#17)
         {"title": " \t\n", "message": "   "},
-        {"message": "a\x00\x1b\ud800 ‮"},  # control and bidi characters: the sanitizer's
+        {"message": "a\x00\x1b\U0001f535 \u202e"},  # control and bidi characters: the sanitizer's
         {"message": "é😀" * 10},
         {"link": "x" * 5000},  # the link rule is #18: only the type is judged here
         {"title": "only a title"},  # an absent message is empty_message (#17)
