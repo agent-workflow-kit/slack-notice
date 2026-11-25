@@ -13,7 +13,9 @@ waited for or killed, and events are ordered by pipe handshakes, never by sleepi
 
 from __future__ import annotations
 
+import contextlib
 import json
+import select
 import subprocess
 import sys
 from pathlib import Path
@@ -125,12 +127,18 @@ def test_a_send_lock_held_by_another_process_still_logs_the_unavailable_result(
     )
     assert proc.stdin is not None and proc.stdout is not None
     try:
+        # bounded: a hung child fails the test (and is killed below) instead of blocking the suite
+        readable, _, _ = select.select([proc.stdout], [], [], 30)
+        assert readable, "the lock holder never said ready"
         assert proc.stdout.readline() == b"ready\n"  # the child holds send.lock from here on
         sent = go(SEND, fake_gateway, stdin=HELLO, config=write_config(tmp_path, "timeout: 3\n"))
         assert proc.poll() is None  # still the holder when the send gave up
         # The send waited on the real lock (a try that failed, more than once), and the log lock
         # was a different file: the record was written while the send lock was held elsewhere.
-        assert fake_gateway.events.count("try_lock") > 2
+        # Under the virtual clock the 3 s timeout at the 50 ms poll is 3 / 0.05 = 60 failed tries
+        # (62 observed, with the first and the final one); a 1 s poll would give about 3. Half
+        # the observed count pins the cadence without depending on the exact edge tries.
+        assert fake_gateway.events.count("try_lock") >= 30
         assert (sent.code, sent.exited) == (12, True)
         assert sent.error["code"] == "unavailable" and sent.error["details"] == {"phase": "lock"}
         assert fake_gateway.connections == []
@@ -153,6 +161,8 @@ def test_a_send_lock_held_by_another_process_still_logs_the_unavailable_result(
         if proc.poll() is None:
             proc.kill()  # this Popen's own pid
             proc.wait()
-        proc.stdin.close()
-        proc.stdout.close()
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+        with contextlib.suppress(OSError):
+            proc.stdout.close()
     assert (state_path(fake_gateway) / "log.jsonl").is_file()

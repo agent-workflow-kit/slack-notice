@@ -94,11 +94,15 @@ SLOW_RATE = at(429, b"{}", wait=1.125)  # 1.5 s in all: the 2 s wait no longer f
 
 
 def odd_status(status: int) -> Attempt:
-    """An answer whose status the fake's ``Reply`` refuses to build (``http.client`` returns a final
-    1xx other than 100, and statuses up to 999, so they are real answers). The status is forced past
-    the ``Reply`` check; a 1xx has an empty body, as in ``http.client``."""
-    reply = Reply(status=200, body=b"", first_byte_delay=0.5)
-    object.__setattr__(reply, "status", status)
+    """An answer with an unusual status (``http.client`` returns a final 1xx other than 100, and
+    statuses up to 999, so they are real answers). The fake's ``Reply`` accepts 200..999 and
+    refuses a 1xx, so only a 1xx is forced past its check; a 1xx has an empty body, as in
+    ``http.client``."""
+    if status >= 200:
+        reply = Reply(status=status, body=b"", first_byte_delay=0.5)
+    else:
+        reply = Reply(status=200, body=b"", first_byte_delay=0.5)
+        object.__setattr__(reply, "status", status)
     return Attempt(connect_delay=0.125, tls_delay=0.25, reply=reply)
 
 
