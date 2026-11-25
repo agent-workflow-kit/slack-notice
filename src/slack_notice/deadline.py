@@ -21,7 +21,7 @@ frames nor chunk trailer lines, and a trickling peer resets per-operation timeou
 never joined, its socket is not touched by the main thread, and the process ends through
 ``gateway.exit_now`` (``os._exit``) after the result is printed, flushed and logged.
 
-What this module does not do (owners in the TODOs): retries (#26), the signal handler and exit
+What this module does not do (owners in the TODOs): the signal handler and exit
 codes beyond ``Verdict.exit_code`` (#27), and the ``send`` flow that prints and logs (#28). The
 lock wait and the input read are outside the gate: they happen in the main thread before the
 worker starts and end the send with ``unavailable`` there.
@@ -125,6 +125,11 @@ class Deadline:
     def remaining(self) -> float:
         """Seconds to the deadline (negative once passed)."""
         return self._at - self._gateway.monotonic()
+
+    @property
+    def expired(self) -> bool:
+        """The deadline passed or a signal was noted (a plain read, no lock)."""
+        return self._signalled or not self.remaining() > 0
 
     def note_signal(self) -> None:
         """A signal arrived: it is the deadline. Lock-free (see the module docstring)."""
@@ -259,22 +264,78 @@ class Deadline:
             self._wake.set()
 
 
+# Interface, "Webhook edge", Retries: the waits are the tool's own constants. The server's
+# Retry-After is never read (the gateway's response exposes no headers at all).
+RATE_LIMIT_WAITS = (2.0, 4.0)  # a 429 is retried up to twice, after 2 s and then 4 s
+CONNECTION_WAIT = 2.0  # a failure while the gate is idle is retried once, after 2 s
+MAX_CONNECTION_RETRIES = 1
+
+
 def attempt_work(
     gateway: Gateway, target: Webhook, body: bytes, *, timeout: float
 ) -> Callable[[Deadline], Outcome]:
-    """The worker body of one attempt. TODO(#26): the retry loop replaces it (waits, the two
-    counters, ``record(..., final=False)`` and ``rate_limited``'s ``retry_after_s``)."""
+    """The worker body: the retry loop (#26).
+
+    Two independent counters: at most ``len(RATE_LIMIT_WAITS)`` retries after a 429 and at most
+    ``MAX_CONNECTION_RETRIES`` after a failure while the gate was idle (``Outcome.retry``), so at
+    most four attempts. Nothing else is retried: any other result, and every failure once the gate
+    entered writing, ends the send. Each attempt takes ``enter_writing`` itself (and so re-runs the
+    gate's ``on_writing`` hook, the send lock's stamp of #28).
+
+    A retry is preceded by a wait on the gateway clock. A wait that is as long as or longer than
+    the time left ends the send at once, without sleeping, with the last result (a 429 then
+    carries that wait as ``retry_after_s``). A result that will be retried is stored with
+    ``record(final=False)``: for a 429 that also returns the gate to idle in the same step, and its
+    ``retry_after_s`` is the wait that follows (the one performed last when there is no more).
+    When ``record`` reports that the deadline was already decided, the loop stops: nothing is
+    waited for or attempted after the decision. An attempt that fails before the first byte after
+    the deadline passed failed because of the deadline, so the earlier result stays the last one.
+    """
 
     def work(deadline: Deadline) -> Outcome:
-        result = post_once(
-            gateway,
-            target,
-            body,
-            timeout=timeout,
-            before_write=deadline.enter_writing,
-            remaining=deadline.remaining,
-        )
-        return map_attempt(result, gate_writing=deadline.writing)
+        rate_retries = 0
+        connection_retries = 0
+        last: Outcome | None = None
+        while True:
+            entered = False
+
+            def before_write() -> bool:
+                nonlocal entered
+                entered = deadline.enter_writing() or entered
+                return entered
+
+            result = post_once(
+                gateway,
+                target,
+                body,
+                timeout=timeout,
+                before_write=before_write,
+                remaining=deadline.remaining,
+            )
+            outcome = map_attempt(result, gate_writing=entered)
+            if outcome.retry is Retry.RATE_LIMIT:
+                if rate_retries >= len(RATE_LIMIT_WAITS):
+                    return outcome.with_retry_after(RATE_LIMIT_WAITS[-1])
+                wait = RATE_LIMIT_WAITS[rate_retries]
+                outcome = outcome.with_retry_after(wait)
+                rate_retries += 1
+            elif outcome.retry is Retry.CONNECTION:
+                if deadline.expired and last is not None:
+                    return last
+                if connection_retries >= MAX_CONNECTION_RETRIES:
+                    return outcome
+                wait = CONNECTION_WAIT
+                connection_retries += 1
+            else:
+                return outcome
+            if not wait < deadline.remaining():
+                return outcome
+            if not deadline.record(outcome, final=False):
+                return outcome
+            last = outcome
+            gateway.sleep(wait)
+            if deadline.expired:
+                return outcome
 
     return work
 
