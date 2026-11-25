@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/cli/validate.json",
   "title": "validate --json output",
-  "description": "Printed by validate when the config loads (an unloadable config prints the error envelope and exits 2). validate never prompts. Checks run in order (config, credential, test_message) and a failed check ends the run, so ok is true only when every printed check is ok. ok false is printed with the exit code of the failing check. Plain validate of a disabled tool runs its checks and reports enabled false. With --test-message on a disabled tool nothing is sent, no check runs and the document is {outcome: disabled} (exit 22), as in send.json. Delivery of a test message is not observable: a human must look in Slack.",
+  "description": "Printed by validate when the config loads (an unloadable config prints the error envelope and exits 2). validate never prompts. Checks run in order (config, credential, test_message) and a failed check ends the run, so ok is true only when every printed check is ok. ok false is printed with the exit code of the failing check. Plain validate of a disabled tool runs its checks and reports enabled false. With --test-message on a disabled tool nothing is sent, no check runs and the document is {outcome: disabled} (exit 22), as in send.json. Delivery of a test message is not observable: a human must look in Slack. The checks array is a prefix of config, credential, test_message (never empty, each at most once, in that order) and only its last check may be ok false.",
   "oneOf": [
     {
       "type": "object",
@@ -16,31 +16,69 @@
         },
         "checks": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "name": {
-                "enum": [
-                  "config",
-                  "credential",
-                  "test_message"
-                ]
-              },
-              "ok": {
-                "type": "boolean"
-              },
-              "message": {
-                "type": "string",
-                "description": "Never contains the webhook URL or any part of it."
+          "minItems": 1,
+          "prefixItems": [
+            {
+              "$ref": "#/$defs/check",
+              "properties": {
+                "name": {
+                  "const": "config"
+                }
               }
             },
-            "required": [
-              "name",
-              "ok",
-              "message"
-            ],
-            "additionalProperties": false
-          }
+            {
+              "$ref": "#/$defs/check",
+              "properties": {
+                "name": {
+                  "const": "credential"
+                }
+              }
+            },
+            {
+              "$ref": "#/$defs/check",
+              "properties": {
+                "name": {
+                  "const": "test_message"
+                }
+              }
+            }
+          ],
+          "items": false,
+          "allOf": [
+            {
+              "if": {
+                "minItems": 2
+              },
+              "then": {
+                "prefixItems": [
+                  {
+                    "properties": {
+                      "ok": {
+                        "const": true
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "if": {
+                "minItems": 3
+              },
+              "then": {
+                "prefixItems": [
+                  {},
+                  {
+                    "properties": {
+                      "ok": {
+                        "const": true
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
         }
       },
       "required": [
@@ -117,5 +155,32 @@
       ],
       "additionalProperties": false
     }
-  ]
+  ],
+  "$defs": {
+    "check": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "enum": [
+            "config",
+            "credential",
+            "test_message"
+          ]
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string",
+          "description": "Never contains the webhook URL or any part of it."
+        }
+      },
+      "required": [
+        "name",
+        "ok",
+        "message"
+      ],
+      "additionalProperties": false
+    }
+  }
 }

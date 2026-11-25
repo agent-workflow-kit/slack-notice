@@ -107,7 +107,7 @@
         },
         "properties": {
           "http_status": {
-            "type": "integer"
+            "const": 200
           }
         }
       }

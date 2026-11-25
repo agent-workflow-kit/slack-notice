@@ -30,7 +30,7 @@
       "type": "string",
       "format": "date-time",
       "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z(?![\\s\\S])",
-      "description": "UTC with millisecond precision: YYYY-MM-DDTHH:MM:SS.mmmZ."
+      "description": "UTC with millisecond precision: YYYY-MM-DDTHH:MM:SS.mmmZ. The pattern checks the shape only (it does not reject a month 13 or a day 40); the tool emits valid timestamps."
     },
     "sha256_16": {
       "type": "string",
@@ -545,6 +545,11 @@
                   "key": {
                     "type": "string"
                   }
+                },
+                "propertyNames": {
+                  "enum": [
+                    "key"
+                  ]
                 }
               }
             }
@@ -578,6 +583,11 @@
                       "lock"
                     ]
                   }
+                },
+                "propertyNames": {
+                  "enum": [
+                    "phase"
+                  ]
                 }
               }
             }
@@ -598,6 +608,7 @@
             "properties": {
               "details": {
                 "not": {
+                  "type": "object",
                   "required": [
                     "phase"
                   ]
@@ -631,6 +642,11 @@
                   "pointer": {
                     "type": "string"
                   }
+                },
+                "propertyNames": {
+                  "enum": [
+                    "pointer"
+                  ]
                 }
               }
             }
@@ -661,6 +677,11 @@
                   "env": {
                     "type": "string"
                   }
+                },
+                "propertyNames": {
+                  "enum": [
+                    "env"
+                  ]
                 }
               }
             }
@@ -696,6 +717,11 @@
                       410
                     ]
                   }
+                },
+                "propertyNames": {
+                  "enum": [
+                    "http_status"
+                  ]
                 }
               }
             }
@@ -733,6 +759,12 @@
                   "http_status": {
                     "const": 400
                   }
+                },
+                "propertyNames": {
+                  "enum": [
+                    "host_error",
+                    "http_status"
+                  ]
                 }
               }
             }
@@ -767,7 +799,211 @@
                   "timeout": {
                     "type": "boolean"
                   }
+                },
+                "propertyNames": {
+                  "enum": [
+                    "tls",
+                    "timeout"
+                  ]
                 }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "rate_limited"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "http_status"
+                ],
+                "properties": {
+                  "http_status": {
+                    "const": 429
+                  }
+                },
+                "propertyNames": {
+                  "enum": [
+                    "http_status"
+                  ]
+                }
+              },
+              "retry_after_s": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "upstream_error"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "required": [
+              "details"
+            ],
+            "properties": {
+              "details": {
+                "type": "object",
+                "required": [
+                  "http_status"
+                ],
+                "properties": {
+                  "http_status": {
+                    "type": "integer",
+                    "minimum": 500,
+                    "maximum": 599
+                  }
+                },
+                "propertyNames": {
+                  "enum": [
+                    "http_status"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "wrong_host_response"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "propertyNames": {
+                  "enum": [
+                    "http_status"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "wrong_host_response"
+              },
+              "details": {
+                "type": "object",
+                "required": [
+                  "http_status"
+                ],
+                "properties": {
+                  "http_status": {
+                    "not": {
+                      "minimum": 200,
+                      "maximum": 299
+                    }
+                  }
+                }
+              }
+            },
+            "required": [
+              "code",
+              "details"
+            ]
+          },
+          "then": {
+            "properties": {
+              "unknown_outcome": {
+                "const": false
+              }
+            }
+          },
+          "else": {
+            "if": {
+              "properties": {
+                "code": {
+                  "const": "wrong_host_response"
+                }
+              },
+              "required": [
+                "code"
+              ]
+            },
+            "then": {
+              "properties": {
+                "unknown_outcome": {
+                  "const": true
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "usage",
+                  "internal",
+                  "outcome_unknown"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "empty_message",
+                  "link_invalid",
+                  "link_scheme"
+                ]
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          },
+          "then": {
+            "properties": {
+              "details": {
+                "type": "null"
               }
             }
           }

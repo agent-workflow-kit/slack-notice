@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "slack-notice/log.json",
   "title": "slack-notice log.jsonl record",
-  "description": "One record per outcome that reaches send step 3 or later (sent, refused, failed, outcome_unknown). Not logged: exit 1 before the request was started, exit 2, exit 22, a signal before step 5 (128+N) and dry runs. An exit 1 after the request was started is logged, best effort, as outcome_unknown with exit 1 and code internal. Never contains a title, message, link, URL or credential. A log write failure warns only. Rotates at 1 MiB, keeping 3 files. A state-directory problem writes no record and never changes the exit code. ts is UTC with milliseconds.",
+  "description": "One record per outcome that reaches send step 3 or later (sent, refused, failed, outcome_unknown). Not logged: exit 1 before the request was started, exit 2, exit 22, a signal before step 5 (128+N) and dry runs. An exit 1 after the request was started is logged, best effort, as outcome_unknown with exit 1 and code internal. Never contains a title, message, link, URL or credential. A log write failure warns only. Rotates at 1 MiB, keeping 3 files. A state-directory problem writes no record and never changes the exit code. ts is UTC with milliseconds. http_status is 200 for sent, null when no response arrived (refused, credential_invalid, unavailable, network_error), 500 to 599 for upstream_error; for wrong_host_response it is a 2xx or null under outcome_unknown and another status under failed.",
   "type": "object",
   "properties": {
     "ts": {
@@ -161,6 +161,21 @@
           },
           "reason": {
             "type": "null"
+          },
+          "level": {
+            "type": "string"
+          },
+          "bytes": {
+            "type": "integer"
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "message_sha256": {
+            "type": "string"
+          },
+          "http_status": {
+            "const": 200
           }
         }
       }
@@ -186,6 +201,9 @@
           },
           "reason": {
             "$ref": "defs.json#/$defs/refusal_reason"
+          },
+          "http_status": {
+            "type": "null"
           }
         }
       }
@@ -286,6 +304,109 @@
           },
           "code": {
             "const": "internal"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "enum": [
+              "credential_invalid",
+              "unavailable",
+              "network_error"
+            ]
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "http_status": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "const": "upstream_error"
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "http_status": {
+            "type": "integer",
+            "minimum": 500,
+            "maximum": 599
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "failed"
+          },
+          "code": {
+            "const": "wrong_host_response"
+          }
+        },
+        "required": [
+          "outcome",
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "http_status": {
+            "type": "integer",
+            "not": {
+              "minimum": 200,
+              "maximum": 299
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "outcome": {
+            "const": "outcome_unknown"
+          },
+          "code": {
+            "const": "wrong_host_response"
+          }
+        },
+        "required": [
+          "outcome",
+          "code"
+        ]
+      },
+      "then": {
+        "properties": {
+          "http_status": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "integer",
+                "minimum": 200,
+                "maximum": 299
+              }
+            ]
           }
         }
       }
