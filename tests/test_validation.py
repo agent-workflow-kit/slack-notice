@@ -634,24 +634,39 @@ def test_empty_values_pass_this_step_for_the_sanitizer(
 def test_no_output_ever_holds_an_input_value(
     fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cases = [
-        (["send", "--message", "m", "--level", CANARY], None),
-        (["send", "--message", CANARY * 20_000], None),
-        (["send", "--message", "m", "--title", CANARY * 20_000], None),
-        (["send", "--stdin-json"], json.dumps({"message": "a", CANARY + "!": CANARY}).encode()),
-        (["send", "--stdin-json"], json.dumps({"message": CANARY, "level": CANARY}).encode()),
-        (["send", "--stdin-json"], json.dumps({"message": [CANARY], CANARY: [CANARY]}).encode()),
-        (["send", "--stdin-json"], json.dumps({CANARY: "v"}).encode()),  # a matching name: pointer
-        (["send", "--message", "m", "--title", "t", "--stdin-json"], None),
-        (["send", "--message", "m", f"--dedupe-key={'é' * 1025}{CANARY}"], None),
+    # (argv, stdin, pointer_echo): a field name that matches the pattern is reported in the
+    # pointer as the spec says; that pointer is the only place an input text may appear.
+    cases: list[tuple[list[str], bytes | None, bool]] = [
+        (["send", "--message", "m", "--level", CANARY], None, False),
+        (["send", "--message", CANARY * 20_000], None, False),
+        (["send", "--message", "m", "--title", CANARY * 20_000], None, False),
+        (
+            ["send", "--stdin-json"],
+            json.dumps({"message": "a", CANARY + "!": CANARY}).encode(),
+            False,
+        ),
+        (
+            ["send", "--stdin-json"],
+            json.dumps({"message": CANARY, "level": CANARY}).encode(),
+            False,
+        ),
+        (
+            ["send", "--stdin-json"],
+            json.dumps({"message": [CANARY], CANARY: [CANARY]}).encode(),
+            True,
+        ),
+        (["send", "--stdin-json"], json.dumps({CANARY: "v"}).encode(), True),
+        (["send", "--message", "m", "--title", "t", "--stdin-json"], None, False),
+        (["send", "--message", "m", f"--dedupe-key={'é' * 1025}{CANARY}"], None, False),
     ]
-    for argv, stdin in cases:
+    for argv, stdin, pointer_echo in cases:
         for json_mode in (True, False):
             result = run(argv, fake_gateway, monkeypatch, stdin=stdin, json_mode=json_mode)
             assert result.code in (2, 20)
-            assert (CANARY * 3) not in result.out + result.err
-            if CANARY + "!" in json.dumps(argv):
-                assert CANARY not in result.out + result.err
+            text = result.out + result.err
+            if pointer_echo:
+                text = text.replace("/" + CANARY, "")
+            assert CANARY not in text
     # a field name that matches the pattern is reported as the spec says: that is the one echo
     result = run(
         ["send", "--stdin-json"],

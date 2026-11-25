@@ -362,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--file", metavar="PATH", help="read JSON from a file ('-' is stdin)")
     send.add_argument("--title", metavar="TEXT")
     send.add_argument("--message", metavar="TEXT")
-    # The level and link are checked like the JSON fields (exit 20, with a pointer): #16.
+    # The level and link are checked like the JSON fields (exit 20, with a pointer).
     send.add_argument("--level", metavar="LEVEL")
     send.add_argument("--link", metavar="URL")
     send.add_argument("--dedupe-key", metavar="KEY")
@@ -481,7 +481,9 @@ def check_stdin_source(args: argparse.Namespace, streams: Streams) -> None:
 
 
 def load_settings(ctx: Context) -> dict[str, Any]:
-    """The effective settings: flags, then the config file and drop-ins, then the defaults.
+    """The effective settings: the config file and drop-ins over the defaults.
+
+    No flag names a setting.
 
     A file that cannot be used is exit 2 config_invalid with the file path (or `--config` for a
     missing --config file) in details.key and a fixed message. A value that breaks a rule is the
@@ -521,7 +523,6 @@ def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
     ``remaining`` is the seconds left of the deadline, which starts at step 3. The caller
     never sees input text in an error.
 
-    TODO(#16): validate the fields and the flag source (the flag-only form reads no JSON).
     TODO(#28): the send handler calls this, starts the deadline and logs ``failed`` for the
     timeout error (a log record for exit 12 ``unavailable``, phase ``input``).
     TODO(#27): a signal during this call must exit 128+N; the handler has to raise or exit.

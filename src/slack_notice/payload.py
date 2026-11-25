@@ -122,8 +122,8 @@ def _parse(data: bytes) -> tuple[dict[str, Any] | None, str]:
 def decode_notification(data: bytes) -> dict[str, Any]:
     """Decode and parse input bytes; raise ``InputRefused`` for anything but an object.
 
-    Fields are not validated here (TODO(#16)). The refusal has no ``__cause__`` or
-    ``__context__``: they would carry the input.
+    Fields are not validated here (see ``validate_notification``). The refusal has no
+    ``__cause__`` or ``__context__``: they would carry the input.
     """
     value, reason = _parse(data)
     if value is None:
@@ -218,7 +218,7 @@ def validate_notification(value: object) -> dict[str, Any]:
     TODO(#17): the absent or empty message (``empty_message``) and the sanitizer.
     TODO(#18): the link rule (``link_invalid``, ``link_scheme``).
     """
-    if not isinstance(value, dict):
+    if not isinstance(value, dict):  # defensive: decode_notification already refuses non-objects
         raise FieldRefused("not_object", "")
     refusal = _refusal(value)
     if refusal is not None:

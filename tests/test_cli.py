@@ -477,13 +477,17 @@ def test_send_and_validate_flags_are_parsed(
     )
     assert run(["validate", "--test-message"], fake_gateway).code == 0
     assert captured[2].args.test_message is True
+    assert run(["send", "--stdin-json"], fake_gateway).code == 0
+    assert (captured[3].args.stdin_json, captured[3].args.file) == (True, None)
+    assert run(["send", "--file=f"], fake_gateway).code == 0
+    assert (captured[4].args.stdin_json, captured[4].args.file) == (False, "f")
 
 
 @pytest.mark.parametrize("value", ["bogus", "", "INFO"])
 def test_flag_values_are_not_judged_by_the_parser(
     value: str, captured: list[Context], fake_gateway: FakeGateway
 ) -> None:
-    # A flag value is checked like the same JSON field (exit 20 with a pointer): issue #16.
+    # A flag value is checked like the same JSON field (exit 20 with a pointer) in step 3.
     assert run(["send", "--message=m", f"--level={value}"], fake_gateway).code == 0
     assert captured[0].args.level == value
 
