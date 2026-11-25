@@ -202,6 +202,11 @@ class Gateway(Protocol):
 
     def open_state_file(self, dir_fd: int, name: str, *, append: bool = False) -> int: ...
 
+    def close_fd(self, fd: int) -> None:
+        """Close a descriptor returned by ``open_state_dir`` or ``open_state_file``; an
+        ``OSError`` (already closed) is ignored."""
+        ...
+
     def try_lock(self, fd: int) -> bool: ...
 
     def unlock(self, fd: int) -> None: ...
@@ -512,20 +517,30 @@ class SystemGateway:
             fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         except (OSError, ValueError):
             raise StateUnusable("open") from None
-        info = os.fstat(fd)
-        if info.st_uid != self.uid():
+        try:
+            info = os.fstat(fd)
+            if info.st_uid != self.uid():
+                raise StateUnusable("owner")
+            if info.st_mode & 0o077:
+                raise StateUnusable("mode")
+        except StateUnusable:
             os.close(fd)
-            raise StateUnusable("owner")
-        if info.st_mode & 0o077:
+            raise
+        except OSError:
             os.close(fd)
-            raise StateUnusable("mode")
+            raise StateUnusable("open") from None
         return fd
 
     def open_state_file(self, dir_fd: int, name: str, *, append: bool = False) -> int:
         """Open ``name`` (a single path component) relative to ``dir_fd``; mode 0600 on create.
 
         ``O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`` (plus ``O_APPEND`` for the log) and an ``fstat``
-        regular-file check, so a FIFO, symlink or device is ``StateUnusable``, never a hang.
+        check on the descriptor: a regular file owned by the user, one link, no group or other
+        permission. A FIFO, symlink, device, hardlinked or foreign file is ``StateUnusable``,
+        never a hang. Residual (same-user boundary): ``.local`` and ``.local/state`` are
+        followed if they are links; only the leaf is ``O_NOFOLLOW``. The leaf can be swapped
+        between ``mkdir`` and ``open`` by the same user (accepted); after the open every file
+        is relative to the descriptor.
         """
         if not name or "/" in name or name in (".", "..") or "\0" in name:
             raise ValueError("state file name must be one plain path component")
@@ -536,10 +551,31 @@ class SystemGateway:
             fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
         except OSError:
             raise StateUnusable("open") from None
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise StateUnusable("not_regular")
+            # Beyond the interface's letter, in its spirit (conservative): a file with another
+            # owner, another link or group/other access is not ours to append to or lock.
+            if info.st_uid != self.uid():
+                raise StateUnusable("owner")
+            if info.st_nlink != 1:
+                raise StateUnusable("linked")
+            if info.st_mode & 0o077:
+                raise StateUnusable("mode")
+        except StateUnusable:
             os.close(fd)
-            raise StateUnusable("not_regular")
+            raise
+        except OSError:
+            os.close(fd)
+            raise StateUnusable("open") from None
         return fd
+
+    def close_fd(self, fd: int) -> None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     def try_lock(self, fd: int) -> bool:
         """Take an exclusive flock without blocking; ``False`` when another holder has it."""
