@@ -220,7 +220,8 @@ def test_the_cron_lines_join_the_env_file_and_the_tool_with_and_and() -> None:
         line = cron_line(kind)
         assert '. "$HOME/.config/slack-notice/env" && "$HOME/.local/bin/slack-notice" ' in line
         assert ";" not in line.split('slack-notice" ')[0]
-    assert '|| echo "slack-notice failed: $?" >&2' in cron_line("send")
+    guard = '|| { rc=$?; [ "$rc" = 22 ] || echo "slack-notice failed: $rc" >&2; }'
+    assert guard in cron_line("send")
 
 
 def test_the_env_file_recipe_exports_and_keeps_the_secret_off_the_command_line() -> None:
@@ -354,6 +355,18 @@ def test_a_failing_send_writes_its_exit_code_to_stderr_for_cron_to_mail(tmp_path
     code, out, err = run(["/bin/sh", "-c", cron_line("send")], m.env, m.home)
     assert (code, out, err) == (0, "", "slack-notice failed: 2\n")
     assert m.log.read_text(encoding="utf-8")  # the details stay in the file
+
+
+def test_a_disabled_tool_exit_22_is_not_mailed_by_the_nightly_line(tmp_path: Path) -> None:
+    m = machine(tmp_path, extra="")
+    stub = m.home / ".local" / "bin" / "slack-notice"
+    stub.write_text("#!/bin/sh\nexit 22\n", encoding="utf-8")
+    code, out, err = run(["/bin/sh", "-c", cron_line("send")], m.env, m.home)
+    assert (code, out, err) == (0, "", "")
+
+
+def test_the_doc_lists_exit_1_with_a_idle_gate_among_the_unlogged_outcomes() -> None:
+    assert "Exit 1 while the gate is not writing, exit codes 2 and 22" in FLAT
 
 
 def test_the_documented_health_line_reads_the_credential_from_the_env_file(tmp_path: Path) -> None:
