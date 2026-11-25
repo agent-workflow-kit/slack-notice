@@ -1199,9 +1199,8 @@ def _lookup_home(args: argparse.Namespace, gateway: Gateway) -> str | None:
     try:
         return resolve_home(gateway)
     except HomeUnusable:
-        raise CliError(
-            2, "config_invalid", "configuration is invalid", details={"key": "home"}
-        ) from None
+        pass  # raised below, outside the handler: no context is kept
+    raise CliError(2, "config_invalid", "configuration is invalid", details={"key": "home"})
 
 
 def _run(

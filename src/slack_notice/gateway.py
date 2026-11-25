@@ -387,11 +387,16 @@ class _StrictResponse(http.client.HTTPResponse):
         if not line:
             raise ValueError("end of file")  # truncated: the caller maps it to IncompleteRead
         line = line.split(b";", 1)[0]
+        size = 0
+        malformed = False
         try:
-            return int(line, 16)
+            size = int(line, 16)
         except ValueError:
+            malformed = True  # its message quotes the line: raised below, outside the handler
+        if malformed:
             self.close()
-            raise MalformedChunkSize("invalid chunk size") from None
+            raise MalformedChunkSize("invalid chunk size")
+        return size
 
 
 class _HttpsResponse:
@@ -501,11 +506,18 @@ class SystemGateway:
         return [str(info[4][0]) for info in infos]
 
     def home_dir(self) -> str:
+        failed = False
+        home = ""
         try:
-            return pwd.getpwuid(self.uid()).pw_dir
+            home = pwd.getpwuid(self.uid()).pw_dir
         except Exception:
             # Any failure, not only a missing entry: the cause may quote the uid or a path.
-            raise HomeLookupError from None
+            failed = True
+        if failed:
+            # Raised outside the handler: ``from None`` would still leave the cause on
+            # ``__context__``, so nothing is being handled when this is raised.
+            raise HomeLookupError
+        return home
 
     def is_directory(self, path: str) -> bool:
         try:

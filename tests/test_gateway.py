@@ -586,7 +586,7 @@ def test_home_dir_lookup_failure_is_a_fixed_error(
         gateway.home_dir()
     assert "secret" not in str(info.value)
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None
     assert gateway.login_name() is None
 
 
@@ -602,7 +602,7 @@ def test_home_dir_any_lookup_exception_is_the_fixed_error(
         gateway.home_dir()
     assert "secret" not in str(info.value)
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None
 
 
 def test_is_directory(gateway: Gateway, tmp_path: Path) -> None:

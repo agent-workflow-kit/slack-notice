@@ -8,6 +8,7 @@ no part of the credential on ``__cause__`` or ``__context__`` either.
 
 from __future__ import annotations
 
+import argparse
 import http.client
 import io
 import ssl
@@ -19,7 +20,8 @@ from typing import Any
 import pytest
 
 from slack_notice import cli, webhook
-from slack_notice.gateway import SystemGateway
+from slack_notice.config import HomeUnusable, resolve_home
+from slack_notice.gateway import HomeLookupError, MalformedChunkSize, SystemGateway, _StrictResponse
 from slack_notice.log import STATE_WARNING
 from tests.fake_gateway import Attempt, FakeGateway, Reply
 from tests.secret_scan import Corpus, Secret
@@ -218,3 +220,45 @@ def test_a_hostile_stream_that_raises_the_url_is_not_echoed_back(fake_gateway: F
     )
     assert sent.code in (0, 1, 12)
     assert Corpus(blobs={"e": kept.getvalue()}).hits(SECRET) == []
+
+
+# --- a failed lookup or parse keeps nothing on the chain ----------------------------------------
+
+
+def assert_clean_chain(exc: BaseException) -> None:
+    assert exc.__cause__ is None and exc.__context__ is None
+    assert chain(exc) == [exc]
+    assert Corpus(blobs={"t": text_of(exc).encode()}).hits(SECRET) == []
+
+
+def failing_getpwuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(_uid: int) -> None:
+        raise RuntimeError(f"getpwuid failed for {SECRET.segments[0]} {SECRET.path}")
+
+    monkeypatch.setattr("pwd.getpwuid", broken)
+
+
+def test_a_failed_home_lookup_holds_nothing_on_the_chain_at_any_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failing_getpwuid(monkeypatch)
+    gateway = SystemGateway()
+    with pytest.raises(HomeLookupError) as lookup:
+        gateway.home_dir()
+    assert_clean_chain(lookup.value)
+    with pytest.raises(HomeUnusable) as unusable:
+        resolve_home(gateway)
+    assert_clean_chain(unusable.value)
+    args = argparse.Namespace(command="send", dry_run=False, config=None)
+    with pytest.raises(cli.CliError) as refused:
+        cli._lookup_home(args, gateway)
+    assert_clean_chain(refused.value)
+    assert refused.value.exit_code == 2
+
+
+def test_a_malformed_chunk_size_holds_nothing_on_the_chain() -> None:
+    response = object.__new__(_StrictResponse)
+    response.fp = io.BytesIO(SECRET.segments[0].encode() + b"\r\n")  # type: ignore[assignment]
+    with pytest.raises(MalformedChunkSize) as caught:
+        response._read_next_chunk_size()
+    assert_clean_chain(caught.value)

@@ -132,10 +132,14 @@ def resolve_home(gateway: Gateway) -> str:
     (so also `~` and `$HOME`, which are never expanded), a path with a NUL, and anything that is
     not an existing directory (a symlink to one is fine; a dangling link is not).
     """
+    home = None
+    failed = False
     try:
         home = gateway.home_dir()
     except HomeLookupError:
-        raise HomeUnusable from None
+        failed = True
+    if failed:
+        raise HomeUnusable  # outside the handler: no context is kept
     # The absolute check is textual (no filesystem access here); a str with a NUL or surrogates
     # is refused without raising, and the directory test is the gateway's.
     if not isinstance(home, str) or not home or not home.startswith("/") or "\x00" in home:
