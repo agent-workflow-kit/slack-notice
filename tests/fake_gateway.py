@@ -188,6 +188,8 @@ class Reply:
     body_trickle: float | None = None
     body_stall_after: int | None = None
     framing: str = "length"
+    # A scripted reset is one of several real outcomes: a real RST may surface as
+    # ConnectionResetError, or as IncompleteRead after a partial body.
     body_error: BaseException | None = None
     body_error_after: int = 0
 
@@ -442,6 +444,9 @@ class FakeConnection:
     def settimeout(self, seconds: float) -> None:
         """As the real connection: it updates ``timeout``, and the live socket only before the
         response exists (afterwards the response owns the socket and keeps its timeout)."""
+        # todo(#25): the real connection freezes the socket timeout only for a will-close
+        # response; for a keep-alive reply ``settimeout`` still reaches the body read. The fake
+        # always freezes it. Per-operation timeouts (#25) must model the difference.
         self.timeout = seconds
         if self._connected and not self.closed and not self._responded:
             _validate_socket_timeout(seconds)
