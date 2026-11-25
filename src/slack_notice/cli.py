@@ -46,11 +46,14 @@ from slack_notice.config import (
 from slack_notice.gateway import Gateway, SystemGateway
 from slack_notice.log import StateDir
 from slack_notice.payload import (
+    FieldRefused,
     InputRefused,
     InputTimedOut,
     SourceUnusable,
     decode_notification,
+    notification_from_flags,
     read_notification,
+    validate_notification,
 )
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
@@ -415,17 +418,63 @@ def parse(argv: Sequence[str]) -> argparse.Namespace:
         raise usage_error("--actor must be human:<name> or auto:<name>")
     # An empty --config path is a missing file (config_invalid, details.key --config): config
     # loading decides it (load_settings), not the parser.
-    # TODO(#16): the other flag combinations of send (including stdin that is a terminal with no
-    # source and no --message) and the checks of the flag values.
+    if args.command == "send":
+        check_send_combinations(args)
     return args
 
 
+TEXT_FLAGS = ("title", "message", "level", "link")
+MAX_DEDUPE_KEY_CHARS = 1024
+
+
+def check_send_combinations(args: argparse.Namespace) -> None:
+    """Step 1: the flag combinations of `send` that need no stream (exit 2 usage, fixed text).
+
+    Exactly one source is used: JSON on stdin, JSON from --file, or the flags (which need
+    --message). The value flags are not judged here: they are checked like the same JSON field
+    when the notification is read (``load_notification``, exit 20 with a pointer).
+    """
+    text_flags = any(getattr(args, name) is not None for name in TEXT_FLAGS)
+    if (args.stdin_json or args.file is not None) and text_flags:
+        raise usage_error(
+            "a JSON source cannot be combined with --title, --message, --level or --link"
+        )
+    if args.stdin_json and args.file is not None and args.file != "-":
+        raise usage_error("--stdin-json cannot be combined with --file <path>")
+    if text_flags and args.message is None:
+        raise usage_error("--title, --level and --link need --message")
+    key: str | None = args.dedupe_key
+    if key is not None and not _dedupe_key_ok(key):
+        raise usage_error("--dedupe-key must be 1 to 1024 characters of valid UTF-8")
+
+
+def _dedupe_key_ok(key: str) -> bool:
+    if not 1 <= len(key) <= MAX_DEDUPE_KEY_CHARS:
+        return False
+    try:
+        key.encode("utf-8")  # bytes that were not UTF-8 arrive as lone surrogates
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def check_stdin_source(args: argparse.Namespace, streams: Streams) -> None:
-    """Step 1: a JSON source on stdin (--stdin-json, --file -) is refused on a terminal."""
+    """Step 1: stdin that is a terminal is no source.
+
+    Refused: a JSON source on stdin (--stdin-json, --file -), and no source at all (no JSON
+    option and no --message, so the default would read the terminal).
+    """
     if args.command != "send":
         return
     if (args.stdin_json or args.file == "-") and streams.stdin_is_tty():
         raise usage_error("--stdin-json and --file - need stdin to be a pipe or a file")
+    if (
+        not args.stdin_json
+        and args.file is None
+        and args.message is None
+        and streams.stdin_is_tty()
+    ):
+        raise usage_error("stdin is a terminal: give --message, --stdin-json or --file")
 
 
 # --- dispatch ------------------------------------------------------------------------------------
@@ -455,7 +504,9 @@ def load_settings(ctx: Context) -> dict[str, Any]:
         raise CliError(
             2, "config_invalid", message or "configuration is invalid", details={"key": key}
         )
-    # TODO(#16): overlay the flag values (resolve_settings) once the flags are checked.
+    # No flag of the interface names a setting (the flags are the notification, the global flags
+    # and --config), so the flag layer of resolve_settings is empty: the result is the validated
+    # config over the defaults, with timeout in seconds. Callers use this, never DEFAULTS.
     return settings
 
 
@@ -506,6 +557,41 @@ def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
     except SourceUnusable:
         error = usage_error(INPUT_FILE_MESSAGE)
     raise error  # raised outside the handlers: no __context__ (it would hold input text)
+
+
+def load_notification(ctx: Context, remaining: float) -> dict[str, Any]:
+    """Step 3: the validated notification from the one source in use, or a CliError.
+
+    With --message the flags are the source and nothing is read (stdin included); otherwise one
+    JSON source is read (``read_input``). Both go through ``validate_notification``, so a flag
+    and a JSON field have the same rule and the same pointer (exit 20 ``invalid_payload``).
+    The error holds a fixed message and the pointer, never an input value.
+
+    TODO(#17), TODO(#18): the sanitizer, ``empty_message`` and the link rule come after this.
+    TODO(#28): the send handler calls this after starting the deadline.
+    """
+    args = ctx.args
+    refused: FieldRefused | None = None
+    notification: dict[str, Any] | None = None
+    try:
+        if args.message is not None:
+            notification = notification_from_flags(
+                title=args.title, message=args.message, level=args.level, link=args.link
+            )
+        else:
+            notification = validate_notification(read_input(ctx, remaining))
+    except FieldRefused as error:
+        refused = error
+    if refused is not None:  # raised here, not in the handler: no context is kept
+        raise CliError(
+            20,
+            "refused",
+            refused.message,
+            reason="invalid_payload",
+            details={"pointer": refused.pointer},
+        )
+    assert notification is not None
+    return notification
 
 
 def _not_implemented(_ctx: Context) -> int:

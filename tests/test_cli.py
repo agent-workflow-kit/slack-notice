@@ -448,8 +448,6 @@ def test_send_and_validate_flags_are_parsed(
 ) -> None:
     argv = [
         "send",
-        "--stdin-json",
-        "--file=f",
         "--title=t",
         "--message=m",
         "--level=warn",
@@ -463,11 +461,14 @@ def test_send_and_validate_flags_are_parsed(
     args = captured[0].args
     assert (args.command, args.stdin_json, args.file, args.title, args.message) == (
         "send",
-        True,
-        "f",
+        False,
+        None,
         "t",
         "m",
     )
+    assert run(["send", "--stdin-json", "--file=f"], fake_gateway).code == 2
+    assert run(["send", "--stdin-json", "--file=-"], fake_gateway).code == 0
+    assert (captured[1].args.stdin_json, captured[1].args.file) == (True, "-")
     assert (args.level, args.link, args.dedupe_key, args.decision_id) == (
         "warn",
         "https://example.com/",
@@ -475,7 +476,7 @@ def test_send_and_validate_flags_are_parsed(
         ["a", "b"],
     )
     assert run(["validate", "--test-message"], fake_gateway).code == 0
-    assert captured[1].args.test_message is True
+    assert captured[2].args.test_message is True
 
 
 @pytest.mark.parametrize("value", ["bogus", "", "INFO"])
@@ -483,7 +484,7 @@ def test_flag_values_are_not_judged_by_the_parser(
     value: str, captured: list[Context], fake_gateway: FakeGateway
 ) -> None:
     # A flag value is checked like the same JSON field (exit 20 with a pointer): issue #16.
-    assert run(["send", f"--level={value}"], fake_gateway).code == 0
+    assert run(["send", "--message=m", f"--level={value}"], fake_gateway).code == 0
     assert captured[0].args.level == value
 
 
@@ -566,14 +567,14 @@ def test_default_actor_is_auto_unknown_when_stdin_is_not_a_terminal(
 def test_default_actor_is_human_user_on_a_terminal(
     captured: list[Context], fake_gateway: FakeGateway
 ) -> None:
-    run(["send"], fake_gateway, tty=True)
+    run(["send", "--message=m"], fake_gateway, tty=True)
     assert (captured[0].actor, captured[0].actor_source) == ("human:tester", "tty")
 
 
 def test_actor_flag_wins_over_a_terminal(
     captured: list[Context], fake_gateway: FakeGateway
 ) -> None:
-    run(["send", "--actor=auto:x"], fake_gateway, tty=True)
+    run(["send", "--message=m", "--actor=auto:x"], fake_gateway, tty=True)
     assert (captured[0].actor, captured[0].actor_source) == ("auto:x", "flag")
 
 
@@ -602,7 +603,7 @@ def test_login_name_is_sanitized_and_cut_to_64(
     login: str | None, expected: str, captured: list[Context], tmp_path: Path
 ) -> None:
     gateway = FakeGateway(home=str(tmp_path), login_name=login)
-    run(["send"], gateway, tty=True)
+    run(["send", "--message=m"], gateway, tty=True)
     assert captured[0].actor == f"human:{expected}"
     assert captured[0].actor_source == "tty"
     assert_valid("defs", json.dumps(captured[0].actor), "actor")
@@ -617,7 +618,7 @@ def test_login_name_is_not_looked_up_without_a_terminal_or_with_a_flag(
 
     gateway = Exploding(home=str(tmp_path))
     assert run(["send"], gateway, tty=False).code == 0
-    assert run(["send", "--actor=auto:x"], gateway, tty=True).code == 0
+    assert run(["send", "--message=m", "--actor=auto:x"], gateway, tty=True).code == 0
 
 
 # --- dispatch, exit 1 and the exit-code mapping ------------------------------------------------

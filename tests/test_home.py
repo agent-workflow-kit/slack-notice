@@ -302,5 +302,5 @@ def test_a_usage_error_comes_before_the_lookup() -> None:
 def test_actor_is_unknown_when_the_entry_has_no_name(seen: list[Context], tmp_path: Path) -> None:
     gateway = gateway_with(str(tmp_path), login_name=None)
     streams = Streams(out=io.BytesIO(), err=io.BytesIO(), stdin_is_tty=lambda: True)
-    assert main(["send"], {}, gateway, streams) == 0
+    assert main(["send", "--message=m"], {}, gateway, streams) == 0
     assert seen[0].actor == "human:unknown"
