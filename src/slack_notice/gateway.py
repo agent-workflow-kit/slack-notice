@@ -228,6 +228,17 @@ class Gateway(Protocol):
         """``ftruncate`` the open file to ``size`` bytes."""
         ...
 
+    def file_mtime(self, fd: int) -> float:
+        """Modification time of the open file in seconds since the epoch (``fstat``);
+        ``OSError`` on failure."""
+        ...
+
+    def set_mtime(self, fd: int, seconds: float) -> None:
+        """Set the access and modification time of the open file (``os.utime`` on the
+        descriptor). ``OSError`` (``EROFS``, ``EPERM``, ...), ``ValueError`` (NaN) or
+        ``OverflowError`` (too large) on failure."""
+        ...
+
     def rename_state_file(self, dir_fd: int, source: str, target: str) -> None:
         """Rename ``source`` to ``target`` (plain names) inside the state directory, replacing
         ``target`` atomically. ``FileNotFoundError`` when ``source`` is missing; a link in
@@ -670,6 +681,12 @@ class SystemGateway:
 
     def truncate_fd(self, fd: int, size: int) -> None:
         os.ftruncate(fd, size)
+
+    def file_mtime(self, fd: int) -> float:
+        return os.fstat(fd).st_mtime_ns / 1e9
+
+    def set_mtime(self, fd: int, seconds: float) -> None:
+        os.utime(fd, times=(seconds, seconds))
 
     def rename_state_file(self, dir_fd: int, source: str, target: str) -> None:
         for name in (source, target):

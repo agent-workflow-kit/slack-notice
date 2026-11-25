@@ -1462,6 +1462,22 @@ def test_state_file_write_size_read_at_and_truncate(gateway: Gateway, tmp_path: 
         os.close(dir_fd)
 
 
+def test_state_file_mtime_is_read_and_set_on_the_descriptor(
+    gateway: Gateway, tmp_path: Path
+) -> None:
+    dir_fd = gateway.open_state_dir(str(tmp_path / "home"))
+    fd = gateway.open_state_file(dir_fd, "send.lock")
+    try:
+        gateway.set_mtime(fd, 1_700_000_000.5)
+        assert gateway.file_mtime(fd) == pytest.approx(1_700_000_000.5, abs=1e-6)
+        with pytest.raises(ValueError):
+            gateway.set_mtime(fd, float("nan"))
+        assert gateway.file_mtime(fd) == pytest.approx(1_700_000_000.5, abs=1e-6)
+    finally:
+        os.close(fd)
+        os.close(dir_fd)
+
+
 def test_rename_state_file_replaces_the_target_and_never_follows_links(
     gateway: Gateway, tmp_path: Path
 ) -> None:

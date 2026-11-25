@@ -519,6 +519,9 @@ class FakeGateway(SystemGateway):
         self.write_limit: int | None = None
         self.rename_errors: dict[str, BaseException] = {}  # keyed by the source name
         self.truncate_error: BaseException | None = None
+        # send-lock hooks: errors raised by file_mtime / set_mtime
+        self.mtime_error: BaseException | None = None
+        self.set_mtime_error: BaseException | None = None
         # config files: an error raised for a path (as given to the gateway) instead of reading
         self.file_errors: dict[str, BaseException] = {}
         self.directory_errors: dict[str, BaseException] = {}
@@ -723,6 +726,18 @@ class FakeGateway(SystemGateway):
         if self.truncate_error is not None:
             raise self.truncate_error
         super().truncate_fd(fd, size)
+
+    def file_mtime(self, fd: int) -> float:
+        self._record("file_mtime")
+        if self.mtime_error is not None:
+            raise self.mtime_error
+        return super().file_mtime(fd)
+
+    def set_mtime(self, fd: int, seconds: float) -> None:
+        self._record("set_mtime")
+        if self.set_mtime_error is not None:
+            raise self.set_mtime_error
+        super().set_mtime(fd, seconds)
 
     def rename_state_file(self, dir_fd: int, source: str, target: str) -> None:
         self._record(f"rename:{source}>{target}")
