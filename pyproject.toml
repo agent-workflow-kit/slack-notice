@@ -34,7 +34,7 @@ pythonVersion = "3.12"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["live: needs real models/hosts/credentials; never run in CI"]
-addopts = "-m 'not live'"
+addopts = "-m 'not live' --strict-markers"
 
 [tool.semantic_release]
 version_toml = ["pyproject.toml:project.version"]
