@@ -11,7 +11,7 @@ import pytest
 
 from slack_notice import cli, config
 from slack_notice.cli import CliError, Context, Streams, main
-from slack_notice.config import ConfigInvalid, validate_config
+from slack_notice.config import ConfigInvalid, config_file_key, validate_config
 from tests.fake_gateway import FakeGateway
 from tests.harness import schema_errors
 
@@ -456,7 +456,7 @@ def test_every_schema_invalid_sample_is_refused_by_the_code_under_the_same_key(
     if expected is not None:
         assert key == expected
     else:  # the unknown_key sample: the schema reports the object, the code names the key
-        assert key == "?" or key in instance
+        assert key == "webhook_url"
 
 
 def test_the_code_is_never_wider_than_the_schema_for_a_table_of_values() -> None:
@@ -538,7 +538,7 @@ def run(text: str, gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch) -> tup
         ('level_prefix: {info: "INFO  x"}\n', "level_prefix"),
         ("level_prefix:\n", "level_prefix"),
         ("<<: {enabled: true}\n", "?"),
-        ("nope: 1\n", "?" if False else "nope"),
+        ("nope: 1\n", "nope"),
         ("home: 1\n", "?"),
     ],
 )
@@ -549,10 +549,11 @@ def test_the_cli_maps_a_bad_value_to_exit_2_config_invalid_with_the_key(
     assert code == 2
     error = json.loads(out)["error"]
     assert error["code"] == "config_invalid"
-    assert error["message"] == "configuration is invalid"
+    assert error["message"].startswith(key)  # the key path, then the rule
+    assert error["message"] != "configuration is invalid"
     assert error["details"] == {"key": key}
     assert error["retryable"] is None
-    assert "configuration is invalid" in err
+    assert error["message"] in err
 
 
 def test_a_value_in_a_dropin_that_breaks_a_rule_is_refused(
@@ -623,3 +624,269 @@ def test_load_settings_error_has_no_chain(
     )
     assert raised[0].__cause__ is None
     assert raised[0].__context__ is None
+
+
+# --- the failure path of the conversion (no pydantic error stays reachable) ----------------------
+
+
+def test_a_failure_of_the_error_conversion_is_the_fallback_key_with_no_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(_error: Any) -> Any:
+        raise MemoryError
+
+    monkeypatch.setattr(config, "_failure_of", boom)
+    with pytest.raises(ConfigInvalid) as raised:
+        validate_config({"enabled": CANARY}, fallback_key="/x")
+    assert raised.value.key == "/x"
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert CANARY not in repr(raised.value.message)
+
+
+def test_a_machinery_failure_uses_the_fallback_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RecursionError
+
+    monkeypatch.setattr(config._Settings, "model_validate", boom)
+    with pytest.raises(ConfigInvalid) as raised:
+        validate_config({}, fallback_key="/x")
+    assert raised.value.key == "/x"
+    assert raised.value.__context__ is None
+
+
+# --- the first invalid known key is the first in table order -------------------------------------
+
+
+def test_the_first_invalid_known_key_in_table_order_is_named() -> None:
+    values = {
+        "log": 1,
+        "timeout": "1h",
+        "max_chars": 1,
+        "level_prefix": {"info": "A\nB"},
+        "body_variable": "a b",
+        "webhook_env": "a b",
+        "enabled": "no",
+    }
+    order = [
+        "enabled",
+        "webhook_env",
+        "body_variable",
+        "level_prefix",
+        "max_chars",
+        "timeout",
+        "log",
+    ]
+    remaining = dict(reversed(list(values.items())))
+    for expected in order:
+        assert key_of(remaining) == expected
+        del remaining[expected]
+
+
+def test_level_prefix_comes_before_max_chars_in_table_order() -> None:
+    assert key_of({"max_chars": 1, "level_prefix": {"info": ""}}) == "level_prefix"
+
+
+# --- a nested unknown key -----------------------------------------------------------------------
+
+
+def test_a_nested_unknown_key_says_it_is_not_a_level() -> None:
+    error = refused({"level_prefix": {"fatal": "x"}})
+    assert error.key == "level_prefix"
+    assert error.rule == "has a key that is not a level (info, warn, action, error)"
+    assert error.message == "level_prefix has a key that is not a level (info, warn, action, error)"
+
+
+# --- empty prefixes -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["\u200c", "\u200d", "\u0301", "\ufe0f", "\u200c\u200d", "\u0301\ufe0f", "\u0903", "\u20dd"],
+)
+def test_a_prefix_that_is_empty_by_definition_is_refused(value: str) -> None:
+    error = refused({"level_prefix": {"warn": value}})
+    assert error.key == "level_prefix"
+    assert error.message.startswith("level_prefix.warn ")
+    assert error.rule == config._RULES["prefix"]
+
+
+@pytest.mark.parametrize("value", [" ", "\u3000", "\u2003", "\u00a0", "\u2000\u0301"])
+def test_a_whitespace_only_prefix_is_refused(value: str) -> None:
+    assert key_of({"level_prefix": {"info": value}}) == "level_prefix"
+
+
+@pytest.mark.parametrize("value", ["A", "\U0001f535 INFO", "x\u0301", "\u200cA"])
+def test_a_prefix_with_a_visible_character_is_accepted(value: str) -> None:
+    assert validate_config({"level_prefix": {"info": value}})["level_prefix"]["info"] == value
+
+
+# --- the removal table, typed from interface.md (not from the code's table) ----------------------
+
+INTERFACE_REMOVED = [
+    0x00AD, 0x061C, 0x180E, 0x200B, 0x200E, 0x200F, 0x202A, 0x202B, 0x202C, 0x202D, 0x202E,
+    0x2060, 0x2061, 0x206E, 0x206F, 0xFEFF, 0xFFF9, 0xFFFA, 0xFFFB, 0xE0000, 0xE0001, 0xE007F,
+    0xE0100, 0xE01EF, 0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x180B, 0x180C, 0x180D, 0x180F,
+]  # fmt: skip
+INTERFACE_KEPT = [
+    0xFE00, 0xFE01, 0xFE0F, 0x200C, 0x200D, 0x0600, 0x0601, 0x0605, 0x06DD, 0x070F, 0x08E2,
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("code", INTERFACE_REMOVED)
+def test_every_removed_character_of_the_interface_list_makes_a_prefix_invalid(code: int) -> None:
+    assert key_of({"level_prefix": {"info": f"a{chr(code)}b"}}) == "level_prefix"
+    assert config._removed(chr(code))
+
+
+@pytest.mark.parametrize("code", INTERFACE_KEPT)
+def test_every_kept_character_of_the_interface_list_is_accepted_in_visible_text(code: int) -> None:
+    text = f"a{chr(code)}b"
+    assert validate_config({"level_prefix": {"info": text}})["level_prefix"]["info"] == text
+    assert not config._removed(chr(code))
+
+
+def _expected_removed() -> set[int]:
+    removed: set[int] = set()
+    for low, high in [
+        (0x00, 0x1F), (0x7F, 0x9F), (0xD800, 0xDFFF), (0xE000, 0xF8FF),
+        (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD),
+        (0x00AD, 0x00AD), (0x061C, 0x061C), (0x180E, 0x180E), (0x200B, 0x200B),
+        (0x200E, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0xFEFF, 0xFEFF),
+        (0xFFF9, 0xFFFB), (0xE0000, 0xE007F), (0xE0100, 0xE01EF), (0x115F, 0x1160),
+        (0x3164, 0x3164), (0xFFA0, 0xFFA0), (0x2800, 0x2800), (0x180B, 0x180D), (0x180F, 0x180F),
+        (0xFDD0, 0xFDEF), (0xFFFE, 0xFFFF),
+    ]:  # fmt: skip
+        removed.update(range(low, high + 1))
+    for plane in range(1, 17):
+        removed.update((plane * 0x10000 + 0xFFFE, plane * 0x10000 + 0xFFFF))
+    for low, high in config._UNASSIGNED_15_0:
+        removed.update(range(low, high + 1))
+    removed.discard(0x0A)
+    return removed
+
+
+def test_removed_is_the_interface_table_for_every_code_point() -> None:
+    expected = _expected_removed()
+    actual = {code for code in range(0x110000) if config._removed(chr(code))}
+    assert actual == expected
+
+
+def test_the_pinned_unassigned_table_agrees_with_the_running_python() -> None:
+    import unicodedata
+
+    pinned = {c for low, high in config._UNASSIGNED_15_0 for c in range(low, high + 1)}
+    running = {c for c in range(0x110000) if unicodedata.category(chr(c)) == "Cn"}
+    # A newer Python assigns more characters; it never un-assigns one.
+    assert running <= pinned
+    if unicodedata.unidata_version == "15.0.0":
+        assert running == pinned
+    else:
+        assert {0x31EF, 0x2FFC, 0x2EBF0} <= pinned - running
+
+
+@pytest.mark.parametrize("code", [0x2FFC, 0x2FFF, 0x31EF, 0x2EBF0, 0x2EE5D])
+def test_characters_assigned_after_unicode_15_0_are_refused_in_a_prefix(code: int) -> None:
+    assert key_of({"level_prefix": {"info": f"a{chr(code)}"}}) == "level_prefix"
+
+
+# --- fallback key through the CLI ----------------------------------------------------------------
+
+
+def _recursion(*_a: Any, **_k: Any) -> Any:
+    raise RecursionError
+
+
+def _settings_key(
+    argv: list[str], gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    monkeypatch.setattr(config._Settings, "model_validate", _recursion)
+    caught: list[CliError] = []
+
+    def handler(ctx: Context) -> int:
+        try:
+            cli.load_settings(ctx)
+        except CliError as error:
+            caught.append(error)
+            raise
+        return 0
+
+    monkeypatch.setitem(cli.HANDLERS, "validate", handler)
+    out, err = io.BytesIO(), io.BytesIO()
+    assert main(argv, {}, gateway, Streams(out=out, err=err, stdin_is_tty=lambda: False)) == 2
+    assert caught[0].__context__ is None
+    return json.loads(out.getvalue().decode())["error"]
+
+
+def test_a_machinery_failure_names_the_default_config_file(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    expected = str(Path(fake_gateway.home_dir()) / ".config" / "slack-notice" / "config.yaml")
+    error = _settings_key(["validate", "--json"], fake_gateway, monkeypatch)
+    assert error["details"] == {"key": expected}
+    assert error["message"] == f"{expected} is invalid"
+
+
+def test_a_machinery_failure_names_an_absolute_config_flag(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    path = tmp_path / "c.yaml"
+    path.write_text("enabled: true\n", encoding="utf-8")
+    error = _settings_key(["validate", "--json", f"--config={path}"], fake_gateway, monkeypatch)
+    assert error["details"] == {"key": str(path)}
+
+
+def test_a_machinery_failure_names_a_relative_config_flag_made_absolute(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "c.yaml").write_text("enabled: true\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    error = _settings_key(["validate", "--json", "--config=c.yaml"], fake_gateway, monkeypatch)
+    assert error["details"] == {"key": str(tmp_path / "c.yaml")}
+
+
+def test_config_file_key_cases(fake_gateway: FakeGateway, tmp_path: Path) -> None:
+    default = "/h/.config/slack-notice/config.yaml"
+    assert config_file_key(fake_gateway, home="/h", config_path=None) == default
+    assert config_file_key(fake_gateway, home=None, config_path=None) == "?"
+    assert config_file_key(fake_gateway, home="/h", config_path="/a/b.yaml") == "/a/b.yaml"
+    assert config_file_key(fake_gateway, home=None, config_path="/a/b.yaml") == "/a/b.yaml"
+    assert config_file_key(fake_gateway, home="/h", config_path="x" * 5000) == "?"
+
+
+# --- the message through the CLI: key and rule, never the value ----------------------------------
+
+
+@pytest.mark.parametrize(
+    ("text", "key", "rule"),
+    [
+        (f"enabled: '{CANARY}'\n", "enabled", "must be true or false"),
+        (f"webhook_env: '{CANARY}'\n", "webhook_env", "must be a variable name"),
+        (f"max_chars: '{CANARY}'\n", "max_chars", "must be an integer from 2000 to 12000"),
+        (f"timeout: '{CANARY}'\n", "timeout", "must be a duration from 3s to 120s"),
+        (f"level_prefix: '{CANARY}'\n", "level_prefix", "must be a mapping"),
+        (f"level_prefix: {{info: '{CANARY}'}}\n", "level_prefix.info", config._RULES["prefix"]),
+        (f"'{CANARY}': 1\n", "?", "is not a known key"),
+        (f"nope: '{CANARY}'\n", "nope", "is not a known key"),
+        (f"level_prefix: {{'{CANARY}': x}}\n", "level_prefix", config._UNKNOWN_LEVEL_RULE),
+    ],
+)
+def test_the_cli_message_holds_the_key_and_the_rule_and_never_the_value(
+    text: str, key: str, rule: str, fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out, err = run(text, fake_gateway, monkeypatch)
+    assert code == 2
+    error = json.loads(out)["error"]
+    assert error["message"] == f"{key} {rule}"
+    assert error["details"]["key"] == key.split(".")[0]
+    assert CANARY not in out + err
+    assert "FAKETOKEN" not in out + err
+    assert "hooks.slack.com" not in out + err
+
+
+def test_a_file_level_failure_keeps_the_fixed_message(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out, _ = run("a: [\n", fake_gateway, monkeypatch)
+    assert code == 2
+    assert json.loads(out)["error"]["message"] == "configuration is invalid"

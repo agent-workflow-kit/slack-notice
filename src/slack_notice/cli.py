@@ -406,10 +406,12 @@ def load_settings(ctx: Context) -> dict[str, Any]:
 
     A file that cannot be used is exit 2 config_invalid with the file path (or `--config` for a
     missing --config file) in details.key and a fixed message. A value that breaks a rule is the
-    same error with the config key name (or `?`) in details.key.
+    same error with the config key name (or `?`) in details.key and a message that names the key
+    and the rule (never the value).
     """
     # TODO(#28), TODO(#31), TODO(#32): the send and validate handlers call this; they wire it in.
     key: str | None = None
+    message = ""
     settings: dict[str, Any] = {}
     try:
         values = load_config(ctx.gateway, home=ctx.home, config_path=ctx.config)
@@ -418,8 +420,11 @@ def load_settings(ctx: Context) -> dict[str, Any]:
         )
     except ConfigInvalid as error:
         key = error.key
+        message = error.message
     if key is not None:  # raised here, not in the handler: no context is kept
-        raise CliError(2, "config_invalid", "configuration is invalid", details={"key": key})
+        raise CliError(
+            2, "config_invalid", message or "configuration is invalid", details={"key": key}
+        )
     # TODO(#16): overlay the flag values (resolve_settings) once the flags are checked.
     return settings
 
