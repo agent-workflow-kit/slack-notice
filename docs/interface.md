@@ -212,9 +212,9 @@ Canonical call: slack-notice send --stdin-json --json --actor auto:<name> [--ded
 | 0 | sent | Record it. |
 | 22 | disabled, a successful no-op | Nothing. A shell caller writes `rc=$?; [ "$rc" = 22 ] && rc=0`. |
 | 20 | the payload was refused | Do not retry; surface once per reason. After link_invalid or link_scheme a caller may retry once without link, putting the URL in the message. |
-| 12 (false, false) | not sent; `host_rejected`, `auth_required` and `credential_invalid` need a person to change the config or the credential; `wrong_host_response` after a status that is not 2xx may be transient | Do not retry; surface once per code and destination. For `wrong_host_response` a router may retry later under the same cap as the next row. |
+| 12 (false, false) | not sent; `host_rejected`, `auth_required` and `credential_invalid` need a person to change the config or the credential; `wrong_host_response` after a status in 300..599 that is not listed may be transient (a final 1xx or a status outside 100..599 is possibly delivered, see the (false, true) row) | Do not retry; surface once per code and destination. For `wrong_host_response` a router may retry later under the same cap as the next row. |
 | 12 (true, false) | not sent, worth retrying (`rate_limited`, `network_error`, `unavailable`, including `unavailable` with `details.phase` `input`) | Retry later with the caller's own backoff and one cap (`rate_limited` has already waited 2 s and 4 s inside the deadline, `network_error` 2 s once and `unavailable` only for the lock or the input; retry_after_s is the tool's own wait, not a server hint). |
-| 12 (false, true) | possibly delivered | Do not retry; record it as possibly sent. A persistent 2xx with a bad body (`wrong_host_response`) means the URL is not a trigger URL. |
+| 12 (false, true) | possibly delivered | Do not retry; record it as possibly sent. `wrong_host_response` after a final 1xx or a status outside 100..599 is also possibly delivered. A persistent 2xx with a bad body (`wrong_host_response`) means the URL is not a trigger URL. |
 | 128+N | the tool was stopped by signal N before the send started | Nothing was sent; the caller that sent the signal knows. |
 | 2, 1 | a usage or config fault, or an internal error | Do not retry; surface as a fault of the deployment. Exit 1 with no envelope: the outcome is unknown. |
 

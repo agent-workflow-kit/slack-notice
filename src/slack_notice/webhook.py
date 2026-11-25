@@ -502,7 +502,7 @@ def map_attempt(attempt: AttemptResult, *, gate_writing: bool) -> Outcome:
     writing and the attempt says it never wrote) is resolved as writing, the reading that never
     claims ``unknown_outcome`` false after a write. A failure is judged before any status: when
     ``failure`` is set the status is ignored. After the gate is writing, anything that is not a
-    complete answer of a defined class (1xx other than 100 and codes outside 100..599 included)
+    complete answer of a defined class (a status below 200 or above 599 included)
     has ``unknown_outcome`` true. Only integers, fixed messages and the one ``host_error``
     pattern leave this function; the exception, its text and the body are never kept.
     """
