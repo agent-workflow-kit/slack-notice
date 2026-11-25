@@ -16,9 +16,10 @@ Hard rules, enforced by tests:
   database and trust comes from the compiled OpenSSL defaults (or fixed fallback files).
 - ``urllib`` is not used: it reads proxy and CA variables and follows redirects.
 - Failures raised here carry fixed messages and never chain a cause that holds a path. Text of
-  ``http.client`` exceptions that can quote the request target (``InvalidURL``) is replaced by a
-  fixed message; other ``http.client``, ``ssl`` and ``socket`` exceptions pass through with
-  their own class, and no URL, header or body is formatted into a message here.
+  ``http.client`` exceptions that can quote the request target (``InvalidURL``,
+  ``UnicodeEncodeError``) is replaced by a fixed message; other ``http.client``, ``ssl`` and
+  ``socket`` exceptions pass through with their own class, and no URL, header or body is
+  formatted into a message here.
 - ``Retry-After``, ``Location`` and every other response header are unreachable.
 """
 
@@ -310,8 +311,9 @@ class _HttpsConnection:
         }
         try:
             self._conn.request("POST", path, body=body, headers=headers)
-        except http.client.InvalidURL:
-            # The original message quotes the request target, which holds the webhook secret.
+        except (http.client.InvalidURL, UnicodeEncodeError):
+            # The original message (or the encode error's ``object``) quotes the request
+            # target, which holds the webhook secret.
             raise http.client.InvalidURL("invalid request") from None
 
     def getresponse(self) -> Response:

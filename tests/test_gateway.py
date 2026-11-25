@@ -82,17 +82,34 @@ def gateway() -> Gateway:
 
 BANNED_ROOTS = frozenset({"urllib", "http", "time", "fcntl", "subprocess", "importlib"})
 ENVIRONMENT_NAMES = frozenset({"environ", "environb", "getenv", "putenv"})
+PROCESS_NAMES = frozenset({"system", "popen"})
+PROCESS_PREFIXES = ("spawn", "exec", "fork", "posix_spawn")
+
+
+def _banned_os_name(name: str) -> bool:
+    return name in ENVIRONMENT_NAMES or name in PROCESS_NAMES or name.startswith(PROCESS_PREFIXES)
 
 
 def banned_references(source: str) -> list[str]:
-    """Banned modules, dynamic imports and environment access the source reaches.
+    """Banned modules, dynamic imports, environment access and process creation in the source.
 
     Roots in ``BANNED_ROOTS`` are banned whole, so an alias (``import http as h``) is caught at
-    the import; ``__import__`` and any ``importlib`` use are banned; ``os.environ`` and friends
-    are caught by attribute, by ``from os import environ`` and by ``getattr(os, "environ")``.
+    the import; ``__import__`` and any ``importlib`` use are banned. Names on the ``os`` module
+    (environment: ``environ`` and friends; processes: ``system``, ``popen``, ``spawn*``,
+    ``exec*``, ``fork*``, ``posix_spawn*``) are caught by attribute, by ``from os import x``
+    and by ``getattr(os, "x")``, but only when the base is the ``os`` module (tracked through
+    ``import os`` and ``import os as x``), so ``self.environ`` is not flagged.
     """
+    tree = ast.parse(source)
+    os_aliases = {
+        (a.asname or a.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for a in node.names
+        if a.name == "os"
+    }
     found: list[str] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found += [
                 a.name
@@ -107,19 +124,29 @@ def banned_references(source: str) -> list[str]:
                 or (base == "importlib" and all(a.name == "metadata" for a in node.names))
             ):
                 found.append(base)
-            if base == "os":
-                found += [f"os.{a.name}" for a in node.names if a.name in ENVIRONMENT_NAMES]
+            if base == "os" and node.level == 0:
+                found += [
+                    f"os.{a.name}" for a in node.names if a.name == "*" or _banned_os_name(a.name)
+                ]
         elif isinstance(node, ast.Name) and node.id == "__import__":
             found.append("__import__")
-        elif isinstance(node, ast.Attribute) and node.attr in ENVIRONMENT_NAMES:
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in os_aliases
+            and _banned_os_name(node.attr)
+        ):
             found.append(f"os.{node.attr}")
         elif (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
             and node.func.id in ("getattr", "__getattribute__")
             and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in os_aliases
             and isinstance(node.args[1], ast.Constant)
-            and node.args[1].value in ENVIRONMENT_NAMES
+            and isinstance(node.args[1].value, str)
+            and _banned_os_name(node.args[1].value)
         ):
             found.append(f"os.{node.args[1].value}")
     return found
@@ -164,6 +191,19 @@ def banned_references(source: str) -> list[str]:
         "from os import environ as e",
         "from os import getenv",
         "import os\ngetattr(os, 'environ')",
+        "import os as o\ngetattr(o, 'getenv')",
+        "import os\nos.system('x')",
+        "import os\nos.popen('x')",
+        "import os\nos.spawnv(0, 'x', [])",
+        "import os\nos.execvp('x', [])",
+        "import os\nos.fork()",
+        "import os\nos.forkpty()",
+        "import os\nos.posix_spawn('x', [], {})",
+        "import os as o\no.system('x')",
+        "from os import system",
+        "from os import fork as f",
+        "from os import execv",
+        "from os import *",
     ],
 )
 def test_import_checker_detects_banned_references(source: str) -> None:
@@ -180,6 +220,9 @@ def test_import_checker_detects_banned_references(source: str) -> None:
         "import ssl",
         "from os import path",
         "import os\nos.getcwd()",
+        "class A:\n    def f(self):\n        return self.environ",
+        "def f(ctx):\n    return ctx.getenv('A'), ctx.system, getattr(ctx, 'environ')",
+        "import os\nclass A:\n    def f(self):\n        return self.environ",
     ],
 )
 def test_import_checker_accepts_other_references(source: str) -> None:
@@ -764,6 +807,20 @@ def test_post_with_an_invalid_target_fails_with_a_fixed_message(
     with pytest.raises(http.client.InvalidURL) as info:
         connection.post("/triggers/T1/SECRET TOKEN", b"{}")
     assert "SECRET" not in str(info.value)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
+
+
+def test_post_with_a_non_ascii_target_fails_with_a_fixed_message(
+    gateway: Gateway, tmp_path: Path, bundle: Path
+) -> None:
+    connection = make_connection(gateway, tmp_path, bundle)
+    with pytest.raises(http.client.InvalidURL) as info:
+        connection.post("/triggers/T1/SECRET\u00e9TOKEN", b"{}")
+    assert str(info.value) == "invalid request"
+    for text in (str(info.value), repr(info.value)):
+        assert "SECRET" not in text
+        assert "/triggers" not in text
     assert info.value.__cause__ is None
     assert info.value.__suppress_context__
 
