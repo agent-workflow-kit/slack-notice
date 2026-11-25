@@ -19,11 +19,12 @@ Errors are plain exceptions with fixed text; ``cli`` maps them to exit codes and
   arrive as JSON escapes are refused by ``validate_notification`` (rule ``surrogate``, with the
   pointer).
 
-TODO(#18): implement the link rule.
+- ``check_link(link)`` (issue #18) is the link rule: three steps, no URL parser (``LinkRefused``).
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 from collections.abc import Mapping
@@ -225,8 +226,9 @@ def validate_notification(value: object) -> dict[str, Any]:
     (an unusable level is refused here, being an enumeration). The raised error has no
     ``__context__``.
 
-    An absent, empty or whitespace-only message passes here: ``sanitize_notification`` refuses it.
-    TODO(#18): the link rule (``link_invalid``, ``link_scheme``).
+    An absent, empty or whitespace-only message passes here, and so does any string link:
+    ``sanitize_notification`` refuses the message (``empty_message``) and then applies the link
+    rule (``check_link``).
     """
     if not isinstance(value, dict):  # defensive: decode_notification already refuses non-objects
         raise FieldRefused("not_object", "")
@@ -242,6 +244,72 @@ def notification_from_flags(
     """The object the flags form: only the flags that were given, validated like JSON input."""
     given = {"title": title, "message": message, "level": level, "link": link}
     return validate_notification({name: text for name, text in given.items() if text is not None})
+
+
+# --- link rule ---------------------------------------------------------------------------------
+
+MAX_LINK_CHARS = 1024
+LINK_MESSAGES = {
+    "link_invalid": "the link is not a valid http or https link",
+    "link_scheme": "the link scheme is not http or https",
+}
+# Step 1: 1 to 1024 printable ASCII characters (U+0021 to U+007E). fullmatch, never `$`.
+_LINK_FORM = re.compile(r"[\x21-\x7e]{1,1024}", re.ASCII)
+# Step 2: a scheme token at the start.
+_LINK_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):", re.ASCII)
+# Step 3: the whole link. T is one allowed character or one percent escape. No userinfo, no empty
+# host, no trailing dot; IPv6 only inside brackets.
+_T = r"(?:[A-Za-z0-9\-._~:/?@!$&'()*+,;=]|%[0-9A-Fa-f]{2})"
+_HOST = r"(?:[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*|\[(?P<v6>[0-9A-Fa-f:.]+)\])"
+_LINK_WHOLE = re.compile(
+    r"(?P<scheme>[Hh][Tt][Tt][Pp][Ss]?)://" + _HOST + r"(?::(?P<port>[0-9]{1,5}))?"
+    r"(?:[/?]" + _T + r"*)?(?:#" + _T + r"*)?",
+    re.ASCII,
+)
+
+
+class LinkRefused(Exception):  # noqa: N818
+    """The link breaks the link rule. Exit 20 ``refused`` with reason ``link_invalid`` or
+    ``link_scheme`` and no details. ``message`` is fixed by reason and never holds the link."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+    @property
+    def message(self) -> str:
+        return LINK_MESSAGES[self.reason]
+
+
+def _link_reason(link: str) -> str | None:
+    """``link_invalid``, ``link_scheme`` or None. Pure text matching: no URL parser, no DNS."""
+    if _LINK_FORM.fullmatch(link) is None:
+        return "link_invalid"
+    scheme = _LINK_SCHEME.match(link)
+    if scheme is not None and scheme.group(1).lower() not in ("http", "https"):
+        return "link_scheme"
+    match = _LINK_WHOLE.fullmatch(link)
+    if match is None:
+        return "link_invalid"
+    port = match.group("port")
+    if port is not None and not 1 <= int(port) <= 65535:
+        return "link_invalid"
+    v6 = match.group("v6")
+    if v6 is not None:
+        try:
+            ipaddress.IPv6Address(v6)
+        except ValueError:
+            return "link_invalid"
+    return None
+
+
+def check_link(link: str) -> str:
+    """The link rule (interface.md, Notification): the link with its scheme lowercased, or
+    ``LinkRefused``. The refusal keeps no ``__context__`` (it would hold the link)."""
+    reason = _link_reason(link)
+    if reason is not None:
+        raise LinkRefused(reason)
+    return link[: link.index(":")].lower() + link[link.index(":") :]
 
 
 # --- sanitizing -------------------------------------------------------------------------------
@@ -263,7 +331,8 @@ class Sanitized:
     """A notification after the sanitizer: what rendering, the hashes and the log are built from.
 
     ``title`` is None when absent or empty after step 5 (see ``title_text`` for the hash input).
-    ``link`` is passed on as given: TODO(#18) the link rule.
+    ``link`` has passed the link rule (``check_link``): only its scheme is lowercased, so its
+    length is what the budget of #19 counts.
     """
 
     title: str | None
@@ -280,7 +349,8 @@ def sanitize_notification(notification: Mapping[str, Any]) -> Sanitized:
     """Sanitize a validated notification (strings only: ``validate_notification`` ran first).
 
     Raises ``EmptyMessage`` (no context kept) for an absent message or one that is empty after
-    step 4 by the definition under the sanitizer. The caller reports it after validation.
+    step 4 by the definition under the sanitizer (checked first), and ``LinkRefused`` for a link
+    that breaks the link rule. The caller reports either after validation.
     """
     message = sanitize_message(notification.get("message", ""))
     raw_title = notification.get("title")
@@ -290,9 +360,10 @@ def sanitize_notification(notification: Mapping[str, Any]) -> Sanitized:
     empty = is_empty(message)
     if empty:
         raise EmptyMessage
+    link = notification.get("link")
     return Sanitized(
         title=title,
         message=message,
         level=notification.get("level", "info"),
-        link=notification.get("link"),
+        link=None if link is None else check_link(link),
     )

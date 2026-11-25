@@ -366,13 +366,18 @@ def test_random_text_is_idempotent_and_clean() -> None:
 
 def test_sanitize_notification_gives_the_sanitized_texts() -> None:
     result = payload.sanitize_notification(
-        {"title": " a\u2028b ", "message": "x\r\n\r\n\r\n\r\ny", "level": "warn", "link": "L"}
+        {
+            "title": " a\u2028b ",
+            "message": "x\r\n\r\n\r\n\r\ny",
+            "level": "warn",
+            "link": "https://L.example",
+        }
     )
     assert (result.title, result.message, result.level, result.link) == (
         "a b",
         "x\n\ny",
         "warn",
-        "L",
+        "https://L.example",
     )
 
 
