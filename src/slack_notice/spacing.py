@@ -20,16 +20,19 @@ and the descriptor were released. No text from the file or the filesystem is kep
 
 TODO(#28): the deadline is passed in as an absolute ``gateway.monotonic()`` value; wiring the
 gate into the send flow is #28.
-TODO(#27): signal handling (a signal during the lock wait is handled as the deadline).
+A ``stop`` callback (the send passes ``Deadline.signalled``) is polled before every flock poll
+and between the slices (at most 100 ms) of the spacing wait: a signal during either wait is the
+deadline, so it raises ``SendLockTimeout`` within 100 ms, with the lock released.
 TODO(#28): the send command maps ``SendLockTimeout`` to the exit 12 envelope and a ``failed``
 log record, calls ``stamp`` just before the POST and ``release`` after step 6.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import TracebackType
 
-from slack_notice.gateway import Gateway
+from slack_notice.gateway import SLICE_SECONDS, Gateway
 from slack_notice.log import StateDir
 
 LOCK_NAME = "send.lock"
@@ -98,9 +101,16 @@ class SendLock:
             self._gateway.close_fd(fd)
 
 
-def _take_lock(gateway: Gateway, fd: int, deadline: float) -> None:
-    """Poll the flock every ``POLL_S``; ``SendLockTimeout`` once the deadline has passed."""
+def _never() -> bool:
+    return False
+
+
+def _take_lock(gateway: Gateway, fd: int, deadline: float, stop: Callable[[], bool]) -> None:
+    """Poll the flock every ``POLL_S``; ``SendLockTimeout`` once the deadline has passed or
+    ``stop`` is true."""
     while True:
+        if stop():
+            raise SendLockTimeout
         if gateway.try_lock(fd):
             return
         remaining = deadline - gateway.monotonic()
@@ -119,7 +129,12 @@ def _spacing_wait(gateway: Gateway, fd: int) -> float:
     return 0.0
 
 
-def acquire(state: StateDir, gateway: Gateway, deadline: float) -> SendLock | None:
+def acquire(
+    state: StateDir,
+    gateway: Gateway,
+    deadline: float,
+    stop: Callable[[], bool] | None = None,
+) -> SendLock | None:
     """Take the send lock and wait out the spacing, both inside ``deadline``.
 
     ``deadline`` is an absolute ``gateway.monotonic()`` value. Returns the held lock, or
@@ -127,8 +142,9 @@ def acquire(state: StateDir, gateway: Gateway, deadline: float) -> SendLock | No
     warning was given and the caller sends anyway). Raises ``SendLockTimeout`` when the
     deadline passes while waiting for the flock (after polling up to it), or at once, without
     sleeping, when the spacing wait is not shorter than the time that remains; the lock is
-    released on every path.
+    released on every path. ``stop`` true (a signal) raises it the same way, within 100 ms.
     """
+    stopped = _never if stop is None else stop
     fd = state.open_file(LOCK_NAME)
     if fd is None:
         return None
@@ -136,7 +152,7 @@ def acquire(state: StateDir, gateway: Gateway, deadline: float) -> SendLock | No
     try:
         lock = SendLock(state, gateway, fd)
         try:
-            _take_lock(gateway, fd, deadline)
+            _take_lock(gateway, fd, deadline, stopped)
         except OSError:
             state.warn()
             lock.release()
@@ -151,9 +167,14 @@ def acquire(state: StateDir, gateway: Gateway, deadline: float) -> SendLock | No
             remaining = deadline - gateway.monotonic()
             if not wait < remaining:  # too long for the deadline (or NaN): end at once
                 raise SendLockTimeout
-            # todo(#27): a signal during this wait must be noticed within 100 ms (slice the
-            # sleep or check the flag); the wait is up to 1 s unsliced here.
-            gateway.sleep(wait)
+            while wait > 1e-9:  # sliced: a signal is noticed within one slice
+                if stopped():
+                    raise SendLockTimeout
+                step = min(SLICE_SECONDS, wait)
+                gateway.sleep(step)
+                wait -= step
+            if stopped():
+                raise SendLockTimeout
         return lock
     except BaseException:
         if lock is None:

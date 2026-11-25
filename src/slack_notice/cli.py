@@ -521,26 +521,35 @@ class _Signalled(BaseException):  # noqa: N818  (not an Exception: no handler ma
 
 
 class _SignalGate:
-    """Whether the result print has begun: from then on a signal is ignored (interface: Signals)."""
+    """What a signal does now (interface: Signals).
+
+    Three phases, in order: before step 5 the handler raises ``_Signalled`` (exit 128+N); from
+    step 5 (``arm``) it only calls the hook, which is ``Deadline.note_signal`` (lock-free, never
+    raises) and the main thread decides within 100 ms; once the result print has begun
+    (``committed``) it does nothing, so the result is written whole.
+    """
 
     def __init__(self) -> None:
         self.committed = False
-        # TODO(#28): from step 5 the send sets this to ``Deadline.note_signal``: a signal then
-        # means the deadline has passed (the main thread notices within 100 ms), not an exit.
         self.on_signal: Callable[[], None] | None = None
+        self.fired: int | None = None  # the signal that is ending the run before step 5
+
+    def arm(self, hook: Callable[[], None]) -> None:
+        """Step 5 begins: a signal is now the deadline passing, not an exit. TODO(#28): the send
+        calls this with ``Deadline.note_signal`` before it takes the lock."""
+        self.on_signal = hook
 
 
 @contextmanager
 def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
-    """SIGTERM, SIGINT and SIGHUP raise ``_Signalled`` once; the old handlers come back after.
+    """SIGTERM, SIGINT and SIGHUP are handled once; the old handlers come back after.
 
-    Once ``gate.committed`` (the result print has begun) the handler returns and the signal is
-    ignored: the result is printed whole and the exit code is the result's. The handlers stay
-    installed until the result is printed and flushed.
-    Handlers can only be installed from the main thread; elsewhere nothing is installed.
-    From step 5 on ``gate.on_signal`` is set (#28) and a signal is the deadline passing, not an
-    exit (``Deadline.note_signal``); the commit point is the start of the printing of the result.
-    TODO(#27): the exit-code side of signals.
+    Before step 5 the first signal ignores the other two (SIG_IGN) and raises ``_Signalled``
+    (a ``BaseException``: no ``except Exception`` swallows it); a signal that was already pending
+    when the dispositions changed finds ``gate.fired`` set and returns, so the first one wins.
+    From step 5 on (``gate.arm``) the handler never raises. Once ``gate.committed`` it returns at
+    once. Handlers can only be installed from the main thread; elsewhere nothing is installed.
+    SIGPIPE is left as the interpreter set it (ignored): a closed pipe is a write error.
     """
     if threading.current_thread() is not threading.main_thread():
         yield
@@ -553,6 +562,9 @@ def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
         if hook is not None:
             hook()  # lock-free (``Deadline.note_signal``); later signals repeat it harmlessly
             return
+        if gate.fired is not None:
+            return
+        gate.fired = number
         for other in SIGNALS:  # handled once: a second signal while unwinding is ignored
             signal.signal(other, signal.SIG_IGN)
         raise _Signalled(number)
@@ -562,7 +574,7 @@ def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
         yield
     finally:
         for number, previous in saved.items():
-            signal.signal(number, previous)
+            signal.signal(number, signal.SIG_DFL if previous is None else previous)
 
 
 # --- dispatch ------------------------------------------------------------------------------------
