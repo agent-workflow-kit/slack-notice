@@ -10,9 +10,8 @@ One send attempt (#23, ``post_once``): the TLS context comes from the gateway, t
 written exactly once through the injected gateway connection, the response status and at most
 4 KiB of body are read, the connection is closed on every path, and the facts come back as an
 ``AttemptResult`` (no exception object, no header, no host, no path). Mapping them to exit codes
-is #24; the gate, the deadline and retries are #25 and #26.
+is ``map_attempt`` (#24, below); the gate, the deadline and retries are #25 and #26.
 
-TODO(#24): implement response mapping and the exception phase rule.
 TODO(#25): implement the deadline (daemon worker, three-state gate, os._exit).
 TODO(#26): implement retries.
 TODO(#28): call ``read_webhook`` at send step 5 and map ``CredentialInvalid`` to exit 12
@@ -22,10 +21,12 @@ TODO(#28): call ``read_webhook`` at send step 5 and map ``CredentialInvalid`` to
 from __future__ import annotations
 
 import enum
+import json
+import math
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from typing import NoReturn
+from dataclasses import dataclass, field, replace
+from typing import Any, NoReturn
 
 from slack_notice import __version__
 from slack_notice.gateway import (
@@ -143,7 +144,7 @@ def read_webhook(env: Mapping[str, str], name: str) -> Webhook:
     return Webhook(path=match.group("path"))
 
 
-# --- one attempt (issue #23) -------------------------------------------------------------------
+# --- one attempt (issue #23) ------------------------------
 
 CHUNK = 1024  # interface, "Webhook edge": response chunks of at most 1 KiB
 BODY_CAP = 4096  # ... up to a cap of 4 KiB
@@ -284,3 +285,278 @@ def post_once(
                 pass
     data = b"".join(chunks)[:BODY_CAP]
     return AttemptResult(phase, status, data, too_long, failure, abandoned)
+
+
+# --- response mapping and the exception phase rule (issue #24) ------------------------------
+
+_HOST_ERROR = re.compile(r"[a-z_]{1,64}", re.ASCII)
+_UNAVAILABLE_PHASES = ("input", "lock")
+_MAX_STATUS = 599
+
+
+class Retry(enum.Enum):
+    """What a retry loop (#26) may do with an outcome. The counters and waits are not here:
+    ``RATE_LIMIT`` is a 429 (nothing was accepted); ``CONNECTION`` is a failure while the gate was
+    idle that is not a certificate failure (``details.tls`` may still be true: a handshake failure
+    is retried once, and the envelope that ends the send then says ``retryable`` false)."""
+
+    NONE = "none"
+    RATE_LIMIT = "rate_limit"
+    CONNECTION = "connection"
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """The result of one attempt, with exactly the fields the envelope and the log record need.
+
+    ``exit_code`` is 0 (``sent``, ``code`` None) or 12. ``message`` is a fixed string. Nothing
+    network-derived is stored except ``details["host_error"]`` (a 400 key that matched
+    ``[a-z_]{1,64}``) and the integer status. ``retry_after_s`` is set by the retry loop (#26)
+    on ``rate_limited`` with ``with_retry_after``; the server's Retry-After is never read.
+    """
+
+    exit_code: int
+    code: str | None
+    message: str
+    http_status: int | None
+    retryable: bool | None
+    unknown_outcome: bool
+    details: dict[str, Any] | None = None
+    retry_after_s: float | None = None
+    retry: Retry = Retry.NONE
+
+    def with_retry_after(self, seconds: float) -> Outcome:
+        if self.code != "rate_limited":
+            raise ValueError("retry_after_s belongs to rate_limited only")
+        ok = type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0
+        if not ok:
+            raise ValueError("retry_after_s must be a finite number of seconds, not negative")
+        return replace(self, retry_after_s=float(seconds))
+
+    def envelope(self) -> dict[str, Any]:
+        """The error envelope (every key present); for exit 12 only."""
+        if self.exit_code != 12 or self.code is None:
+            raise ValueError("only a failure has an error envelope")
+        return {
+            "error": {
+                "code": self.code,
+                "message": self.message,
+                "reason": None,
+                "details": None if self.details is None else dict(self.details),
+                "retryable": self.retryable,
+                "retry_after_s": self.retry_after_s,
+                "unknown_outcome": self.unknown_outcome,
+            }
+        }
+
+    def log_fields(self) -> dict[str, Any]:
+        """The keyword arguments of ``log.build_record`` that this outcome decides."""
+        return {
+            "exit_code": self.exit_code,
+            "code": self.code,
+            "reason": None,
+            "unknown_outcome": self.unknown_outcome,
+            "http_status": self.http_status,
+        }
+
+
+def _failed(
+    code: str,
+    message: str,
+    *,
+    retryable: bool,
+    unknown: bool,
+    details: dict[str, Any] | None = None,
+    http_status: int | None = None,
+    retry: Retry = Retry.NONE,
+) -> Outcome:
+    return Outcome(12, code, message, http_status, retryable, unknown, details, None, retry)
+
+
+def credential_invalid(env: str) -> Outcome:
+    """Exit 12 ``credential_invalid`` (no response: ``http_status`` null in the log)."""
+    return _failed(
+        "credential_invalid", INVALID_MESSAGE, retryable=False, unknown=False, details={"env": env}
+    )
+
+
+def unavailable(phase: str) -> Outcome:
+    """Exit 12 ``unavailable``: the input read (``input``) or the lock wait (``lock``) outlasted
+    the deadline; nothing was sent."""
+    if type(phase) is not str or phase not in _UNAVAILABLE_PHASES:
+        raise ValueError("unavailable has the phase input or lock")
+    return _failed(
+        "unavailable",
+        "the deadline passed before anything was sent",
+        retryable=True,
+        unknown=False,
+        details={"phase": phase},
+    )
+
+
+def outcome_unknown() -> Outcome:
+    """Exit 12 ``outcome_unknown``: the gate was writing and no complete answer arrived."""
+    return _failed(
+        "outcome_unknown",
+        "the request was sent but no complete answer arrived; it may have been delivered",
+        retryable=False,
+        unknown=True,
+    )
+
+
+def network_error(*, tls: bool, timeout: bool, no_usable_ca: bool = False) -> Outcome:
+    """Exit 12 ``network_error``: the gate was idle, nothing was written. ``tls`` true is not
+    retryable (the envelope rule); ``retry`` is for the caller's own loop and is NONE here."""
+    if no_usable_ca:
+        message = "no usable CA certificates were found"
+    elif tls:
+        message = "the TLS connection to the host failed"
+    elif timeout:
+        message = "the connection to the host timed out"
+    else:
+        message = "the connection to the host failed"
+    return _failed(
+        "network_error",
+        message,
+        retryable=not tls,
+        unknown=False,
+        details={"tls": tls, "timeout": timeout},
+    )
+
+
+def _parse_body(body: bytes, too_long: bool) -> dict[str, Any] | None:
+    """The body as a JSON object, or None for a bad body: longer than the cap, not strict UTF-8
+    (a byte order mark is a character JSON refuses), a duplicate key at any depth, NaN or
+    Infinity, nesting that exhausts the parser, a number it refuses, trailing text, or a value
+    that is not an object. Iterative limits are the parser's own; the body is at most 4 KiB."""
+    if too_long or len(body) > BODY_CAP:
+        return None
+    try:
+        text = body.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return None
+
+    def no_constant(_: str) -> NoReturn:
+        raise ValueError("constant")
+
+    def no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(text, parse_constant=no_constant, object_pairs_hook=no_duplicates)
+    except (ValueError, RecursionError, OverflowError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _host_error(attempt: AttemptResult) -> str | None:
+    parsed = _parse_body(attempt.body, attempt.body_too_long)
+    if parsed is None:
+        return None
+    value = parsed.get("error")
+    if type(value) is str and _HOST_ERROR.fullmatch(value) is not None:
+        return value
+    return None
+
+
+def _from_failure(failure: Failure, *, writing: bool) -> Outcome:
+    if not writing:
+        # Gate idle: nothing was written, whatever the exception was.
+        tls = failure.tls or failure.cert_verification or failure.no_usable_ca
+        base = network_error(tls=tls, timeout=failure.timeout, no_usable_ca=failure.no_usable_ca)
+        no_retry = failure.cert_verification or failure.no_usable_ca
+        return replace(base, retry=Retry.NONE if no_retry else Retry.CONNECTION)
+    if failure.malformed:
+        return _wrong_host_response(None, "the host answer was not valid HTTP", unknown=True)
+    return outcome_unknown()
+
+
+def _wrong_host_response(status: int | None, message: str, *, unknown: bool) -> Outcome:
+    return _failed(
+        "wrong_host_response",
+        message,
+        retryable=False,
+        unknown=unknown,
+        details=None if status is None else {"http_status": status},
+        http_status=status,
+    )
+
+
+def map_attempt(attempt: AttemptResult, *, gate_writing: bool) -> Outcome:
+    """Map one attempt to an ``Outcome``: the Webhook edge table of the interface.
+
+    ``gate_writing`` is the state of the deadline gate (#25). The phase of a failure is that
+    state alone; a contradiction with ``attempt.phase`` (the attempt wrote, or the gate moved to
+    writing and the attempt says it never wrote) is resolved as writing, the reading that never
+    claims ``unknown_outcome`` false after a write. A failure is judged before any status: when
+    ``failure`` is set the status is ignored. After the gate is writing, anything that is not a
+    complete answer of a defined class (1xx other than 100 and codes outside 100..599 included)
+    has ``unknown_outcome`` true. Only integers, fixed messages and the one ``host_error``
+    pattern leave this function; the exception, its text and the body are never kept.
+    """
+    if attempt.abandoned:
+        if gate_writing or attempt.phase is not Phase.CONNECT or attempt.failure is not None:
+            raise ValueError("an abandoned attempt wrote nothing")
+        return network_error(tls=False, timeout=True)
+    writing = gate_writing or attempt.phase is not Phase.CONNECT
+    if attempt.failure is not None:
+        return _from_failure(attempt.failure, writing=writing)
+    status = attempt.status
+    if type(status) is not int:
+        raise ValueError("an attempt with no failure has a status")
+    if not writing:
+        raise ValueError("a response cannot arrive before the gate is writing")
+    if not 200 <= status <= _MAX_STATUS:
+        return _wrong_host_response(None, "the host answered with an unusable status", unknown=True)
+    if 200 <= status <= 299:
+        parsed = _parse_body(attempt.body, attempt.body_too_long) if status == 200 else None
+        if parsed is not None and parsed.get("ok") is True:
+            return Outcome(0, None, "sent", 200, None, False)
+        return _wrong_host_response(
+            status, "the host accepted the request but did not confirm it", unknown=True
+        )
+    if status == 400:
+        return _failed(
+            "host_rejected",
+            "the host rejected the request",
+            retryable=False,
+            unknown=False,
+            details={"host_error": _host_error(attempt), "http_status": 400},
+            http_status=400,
+        )
+    if status in (401, 403, 404, 410):
+        return _failed(
+            "auth_required",
+            "the host refused the credential; regenerate the workflow trigger URL",
+            retryable=False,
+            unknown=False,
+            details={"http_status": status},
+            http_status=status,
+        )
+    if status == 429:
+        return _failed(
+            "rate_limited",
+            "the host is rate limiting requests",
+            retryable=True,
+            unknown=False,
+            details={"http_status": 429},
+            http_status=429,
+            retry=Retry.RATE_LIMIT,
+        )
+    if status >= 500:
+        return _failed(
+            "upstream_error",
+            "the host reported a server error; the notification may have been delivered",
+            retryable=False,
+            unknown=True,
+            details={"http_status": status},
+            http_status=status,
+        )
+    return _wrong_host_response(
+        status, "the host answered with an unexpected status", unknown=False
+    )
