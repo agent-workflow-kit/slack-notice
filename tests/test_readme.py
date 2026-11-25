@@ -169,13 +169,15 @@ PAIRS = [
     for i, b in enumerate(all_blocks)
     if b.marker in ("expect", "expect-stderr")
 ]
-MIN_EXEC_BLOCKS = 10
+# Exact counts of the README's executable blocks and expect pairs. Update these
+# when the README's executable blocks change.
+EXPECTED_EXEC_BLOCKS = 10
 MIN_PAIRS = 3
 
 
 def test_enough_examples_are_executed() -> None:
-    assert len(EXEC) >= MIN_EXEC_BLOCKS
-    assert sum(len(commands(b)) for b in EXEC) >= MIN_EXEC_BLOCKS
+    assert len(EXEC) == EXPECTED_EXEC_BLOCKS
+    assert sum(len(commands(b)) for b in EXEC) >= EXPECTED_EXEC_BLOCKS
     assert len(PAIRS) >= MIN_PAIRS
 
 
@@ -296,12 +298,18 @@ def codes_in(text: str, known: set[str]) -> set[str]:
     return {c for c in re.findall(r"[a-z_]+", text) if c in known}
 
 
+def section(pattern: str, text: str) -> str:
+    m = re.search(pattern, text)
+    assert m, pattern
+    return m.group(1)
+
+
 def test_retryable_bullets_match_the_error_envelope() -> None:
     known = exit_table(README.split("## 7. Exit codes")[1])[12]
     envelope = INTERFACE.split("### Error envelope")[1]
-    spec_ff = codes_in(re.search(r"\(false, false\): ([^;]*);", envelope).group(1), known)  # type: ignore[union-attr]
-    spec_tf = codes_in(re.search(r"\(true, false\): ([^;]*);", envelope).group(1), known)  # type: ignore[union-attr]
-    spec_ft = codes_in(re.search(r"\(false, true\): ([^.]*)\.", envelope).group(1), known)  # type: ignore[union-attr]
+    spec_ff = codes_in(section(r"\(false, false\): ([^;]*);", envelope), known)
+    spec_tf = codes_in(section(r"\(true, false\): ([^;]*);", envelope), known)
+    spec_ft = codes_in(section(r"\(false, true\): ([^.]*)\.", envelope), known)
     assert "network_error (false, false when details.tls is true)" in envelope
     bullets = {
         key: re.search(rf"^- `{key}`.*?\((.*?)\):", README, re.M)
