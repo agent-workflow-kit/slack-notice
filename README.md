@@ -279,7 +279,7 @@ The full list is in [Residual risks](docs/interface.md#residual-risks).
 
 ## 11. Automation
 
-Callers such as cron or an agent should use `send --stdin-json --json --actor auto:<name>`, decide by exit code and cap their own retries. Under cron or any scheduler, the variable named by `webhook_env` must be in the calling process's environment, because the tool reads no file or startup script ([Environment variables](docs/interface.md#environment-variables)). The contract is in [Calling from automation](docs/interface.md#calling-from-automation).
+Callers such as cron or an agent should use `send --stdin-json --json --actor auto:<name>`, decide by exit code and cap their own retries. Under cron or any scheduler, the variable named by `webhook_env` must be in the calling process's environment, because the tool reads no file or startup script ([Environment variables](docs/interface.md#environment-variables)). The contract is in [Calling from automation](docs/interface.md#calling-from-automation); the cron setup, shell and script snippets and the health-check recipe are in [docs/automation.md](docs/automation.md).
 
 ## Documentation
 

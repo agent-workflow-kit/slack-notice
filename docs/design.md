@@ -1,6 +1,6 @@
 # slack-notice: design
 
-Status: 0.1.0-design, 2026-11-17 (review pass 2 resolved). The rules are in [interface.md](interface.md), the single normative source; this document records decisions, modules and tests and links to interface headings without restating them. Architecture: `../awkit-docs/architecture.md` (v1.22).
+Status: 0.1.0-design, 2026-11-17 (review pass 2 resolved). The rules are in [interface.md](interface.md), the single normative source; this document records decisions, modules and tests and links to interface headings without restating them. Architecture: `../awkit-docs/architecture.md` (v1.22). The how-to for cron and other automation is [automation.md](automation.md).
 
 ## Role and layer
 
