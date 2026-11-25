@@ -427,6 +427,21 @@ class _VersionAction(argparse.Action):
         raise _EarlyExit(f"slack-notice {__version__}\n")
 
 
+def _untranslated(message: str) -> str:
+    return message
+
+
+def _untranslated_plural(singular: str, plural: str, count: int) -> str:
+    return singular if count == 1 else plural
+
+
+# argparse looks its texts up through gettext, which reads LANGUAGE, LC_ALL, LC_MESSAGES and LANG
+# and, with a ``messages`` catalog installed, changes the help text. No variable is read: the
+# lookup is replaced by the identity (argparse calls these two module names).
+setattr(argparse, "_", _untranslated)  # noqa: B010
+setattr(argparse, "ngettext", _untranslated_plural)  # noqa: B010
+
+
 def _add_global_flags(parser: argparse.ArgumentParser, *, top: bool) -> None:
     """Global flags on the top parser (real defaults) and on each subparser (SUPPRESS)."""
 
