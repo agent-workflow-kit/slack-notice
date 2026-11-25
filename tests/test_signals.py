@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -25,8 +26,14 @@ from typing import Any
 
 import pytest
 
-from slack_notice import __version__
-from slack_notice.cli import SIGNALS, _exit_on_signal, _SignalGate, _Signalled  # pyright: ignore[reportPrivateUsage]
+from slack_notice import __version__, cli
+from slack_notice.cli import (  # pyright: ignore[reportPrivateUsage]
+    SIGNALS,
+    _exit_on_signal,
+    _set_disposition,
+    _SignalGate,
+    _Signalled,
+)
 from slack_notice.deadline import Deadline, GateState, attempt_work, conclude
 from slack_notice.log import build_record, encode_record
 from slack_notice.spacing import SendLockTimeout, acquire
@@ -77,6 +84,8 @@ def mimic_send(
     seconds: float = 30.0,
     before5: Hook | None = None,
     after_arm: Hook | None = None,
+    after_acquire: Hook | None = None,
+    after_commit: Hook | None = None,
     attempts: tuple[Attempt, ...] = (),
     in_emit: Hook | None = None,
     in_record: Hook | None = None,
@@ -93,6 +102,10 @@ def mimic_send(
             try:
                 if before5 is not None:
                     before5()
+                # TODO(#28): the real send creates the Deadline at step 3 (it covers the input
+                # read); the harness creates it here, later, only for convenience. Arm before
+                # acquire (a signal during the lock wait is the deadline, not an exit), and
+                # commit when the result print starts (``emit`` below).
                 at = gateway.monotonic() + seconds
                 deadline = Deadline(gateway, at=at)
                 gate.arm(deadline.note_signal)  # step 5 begins
@@ -105,6 +118,8 @@ def mimic_send(
                     outcome = unavailable("lock")
                     code = outcome.exit_code
                 else:
+                    if after_acquire is not None:
+                        after_acquire()
                     body_work = work or attempt_work(gateway, Webhook(PATH), BODY, timeout=5.0)
                     verdict = deadline.run(body_work)
                     if lock is not None:
@@ -119,6 +134,8 @@ def mimic_send(
                     if in_emit is not None:
                         in_emit()
                     gate.commit()
+                    if after_commit is not None:
+                        after_commit()
                     text = json.dumps(outcome.envelope() if code == 12 else {"outcome": "sent"})
                     sent.printed.append(text)
 
@@ -262,10 +279,10 @@ def test_handlers_are_restored_even_when_a_previous_one_was_not_python(
 
     def fake_signal(number: int, handler: Any) -> Any:
         seen.append((number, handler))
-        old = real(number, handler)
-        return None if len(seen) <= 3 else old  # as for a handler installed from C
+        return real(number, handler)
 
     monkeypatch.setattr(signal, "signal", fake_signal)
+    monkeypatch.setattr(signal, "getsignal", lambda number: None)  # as for a handler from C
     with _exit_on_signal(_SignalGate()):
         pass
     monkeypatch.undo()
@@ -512,7 +529,7 @@ def test_a_signal_during_a_retry_wait_returns_the_last_result_and_opens_no_conne
 
 
 @pytest.mark.parametrize("sig", ALL)
-def test_signals_while_the_result_is_printed_are_ignored(
+def test_signals_while_armed_before_commit_at_the_result_print_leave_one_whole_result(
     sig: signal.Signals, gw: FakeGateway, state: Any, home: Path
 ) -> None:
     def two() -> None:
@@ -523,6 +540,21 @@ def test_signals_while_the_result_is_printed_are_ignored(
     sent = mimic_send(gw, state, attempts=(Attempt(),), in_emit=two)
     assert sent.code == 0
     assert sent.printed == ['{"outcome": "sent"}']  # whole, once
+    assert len(sent.records) == 1 and sent.records[0]["outcome"] == "sent"
+
+
+@pytest.mark.parametrize("sig", ALL)
+def test_signals_after_commit_before_the_write_are_ignored(
+    sig: signal.Signals, gw: FakeGateway, state: Any, home: Path
+) -> None:
+    def two() -> None:
+        kill(sig)
+        kill(signal.SIGTERM)
+        time.sleep(0.02)
+
+    sent = mimic_send(gw, state, attempts=(Attempt(),), after_commit=two)
+    assert sent.code == 0
+    assert sent.printed == ['{"outcome": "sent"}']  # committed and armed: exit and result unchanged
     assert len(sent.records) == 1 and sent.records[0]["outcome"] == "sent"
 
 
@@ -556,3 +588,193 @@ def test_a_signal_noted_before_a_complete_response_does_not_discard_it(
 
 def test_the_gate_states_are_those_of_the_spec() -> None:
     assert {s.value for s in GateState} == {"idle", "writing", "abandoned"}
+
+
+# --- round 1 review: restore window, per-signal restore, unraisable hook, remaining phases ------
+
+
+def test_without_restore_a_noop_handler_stays_so_a_later_signal_changes_nothing() -> None:
+    before = {s: signal.getsignal(s) for s in SIGNALS}
+    gate = _SignalGate()
+    try:
+        with _exit_on_signal(gate, restore=False):
+            pass
+        for sig in SIGNALS:
+            handler = signal.getsignal(sig)
+            assert callable(handler) and handler != before[sig]
+        for sig in ALL:
+            kill(sig)  # no KeyboardInterrupt, no death, no raise
+        time.sleep(0.02)
+        assert gate.fired is None  # the no-op does not touch the gate
+    finally:
+        for sig, handler in before.items():
+            signal.signal(sig, handler)
+
+
+@pytest.mark.parametrize("argv", [None, ["send"]])
+def test_only_the_process_entry_keeps_a_handler_installed(
+    argv: list[str] | None, monkeypatch: pytest.MonkeyPatch, gw: FakeGateway
+) -> None:
+    seen: list[bool] = []
+    real = cli._exit_on_signal  # pyright: ignore[reportPrivateUsage]
+
+    def spy(gate: _SignalGate, restore: bool = True) -> Any:
+        seen.append(restore)
+        return real(gate, restore=True)  # never leave a handler behind in the test run
+
+    monkeypatch.setattr(cli, "_exit_on_signal", spy)
+    monkeypatch.setattr(cli, "_main", lambda *a, **k: 0)
+    monkeypatch.setattr("sys.argv", ["slack-notice"])
+    cli.main(argv, {}, gw)
+    assert seen == [argv is not None]
+
+
+def test_a_signal_mid_install_restores_the_handlers_already_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = {s: signal.getsignal(s) for s in SIGNALS}
+    real = signal.signal
+    calls = 0
+
+    def flaky(number: int, handler: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # the second install: a signal arrives, its handler raises
+            real(number, handler)
+            raise _Signalled(number)
+        return real(number, handler)
+
+    monkeypatch.setattr(signal, "signal", flaky)
+    with pytest.raises(_Signalled):
+        with _exit_on_signal(_SignalGate()):
+            pytest.fail("the body must not run")
+    monkeypatch.undo()
+    assert {s: signal.getsignal(s) for s in SIGNALS} == before
+
+
+@pytest.mark.parametrize("failing", [0, 1, 2])
+def test_every_signal_is_restored_even_when_one_restore_raises(
+    failing: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = {s: signal.getsignal(s) for s in SIGNALS}
+    real = signal.signal
+    restores = 0
+
+    def flaky(number: int, handler: Any) -> Any:
+        nonlocal restores
+        old = real(number, handler)
+        if handler is before[signal.Signals(number)]:  # a restore, not the install
+            restores += 1
+            if restores - 1 == failing:
+                raise _Signalled(number)  # a pending signal's handler raising from the call
+        return old
+
+    monkeypatch.setattr(signal, "signal", flaky)
+    with pytest.raises(_Signalled):
+        with _exit_on_signal(_SignalGate()):
+            pass
+    monkeypatch.undo()
+    assert restores == 3
+    assert {s: signal.getsignal(s) for s in SIGNALS} == before
+
+
+def test_a_signalled_swallowed_by_cleanup_is_not_lost(
+    monkeypatch: pytest.MonkeyPatch, gw: FakeGateway
+) -> None:
+    def swallowing(argv: Any, env: Any, gateway: Any, streams: Any, gate: _SignalGate) -> int:
+        try:
+            gate.fired = signal.SIGTERM  # the handler ran and raised ...
+            raise _Signalled(signal.SIGTERM)
+        except BaseException:  # ... and a cleanup converted it
+            return 0
+
+    monkeypatch.setattr(cli, "_main", swallowing)
+    assert cli.main(["send"], {}, gw) == 128 + signal.SIGTERM
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_the_unraisable_hook_is_restored_by_set_disposition(
+    raises: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hook = sys.unraisablehook
+    seen: list[Any] = []
+
+    def fake_signal(number: int, handler: Any) -> Any:
+        seen.append(sys.unraisablehook)
+        if raises:
+            raise OSError("ignored")
+
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    _set_disposition(signal.SIGTERM, signal.SIG_DFL)
+    monkeypatch.undo()
+    assert seen and seen[0] is not hook  # silenced during the call
+    assert sys.unraisablehook is hook  # and back after, raise or not
+
+
+# --- remaining phases of the spec table ------------------------------------------------------
+
+
+@pytest.mark.parametrize("sig", ALL)
+def test_a_signal_after_acquire_before_the_worker_connects_is_network_error_timeout(
+    sig: signal.Signals, gw: FakeGateway, state: Any, home: Path
+) -> None:
+    sent = mimic_send(gw, state, attempts=(Attempt(),), after_acquire=lambda: kill(sig))
+    error = assert_one_result(sent, code="network_error", unknown=False, outcome="failed")
+    assert error["details"]["timeout"] is True
+    assert "post" not in gw.events
+    fds_and_lock(home)()
+
+
+@pytest.mark.parametrize("sig", ALL)
+def test_a_signal_during_a_429_response_body_read_is_outcome_unknown(
+    sig: signal.Signals,
+    gw: FakeGateway,
+    state: Any,
+    home: Path,
+    release: threading.Event,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reached = threading.Event()
+
+    class Trickle:
+        status = 429
+
+        def read(self, amount: int) -> bytes:
+            reached.set()
+            return b"" if release.wait(0.01) else b"x"
+
+    class Conn(Blocking):
+        def getresponse(self) -> object:
+            return Trickle()
+
+    conn = Conn(release, reached, body=True)
+    monkeypatch.setattr(gw, "https_connection", lambda *a, **k: conn)
+    sent, _ = worker_phase(gw, state, sig, reached=reached)
+    assert_one_result(sent, code="outcome_unknown", unknown=True, outcome="outcome_unknown")
+    release.set()
+
+
+@pytest.mark.parametrize("sig", ALL)
+def test_a_signal_during_a_retry_wait_after_a_connection_failure_is_a_retryable_network_error(
+    sig: signal.Signals,
+    gw: FakeGateway,
+    state: Any,
+    home: Path,
+    release: threading.Event,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reached = threading.Event()
+
+    def long_sleep(seconds: float) -> None:
+        reached.set()
+        release.wait(SAFETY)
+
+    monkeypatch.setattr(gw, "sleep", long_sleep)
+    failing = Attempt(connect_error=OSError("refused"))
+    sent, _ = worker_phase(gw, state, sig, attempts=(failing, Attempt()), reached=reached)
+    error = assert_one_result(sent, code="network_error", unknown=False, outcome="failed")
+    assert error["retryable"] is True
+    release.set()
+    for t in [t for t in threading.enumerate() if t.name == "slack-notice-worker"]:
+        t.join(SAFETY)
+    assert gw.events.count("https_connection") == 1  # the woken worker opened nothing more

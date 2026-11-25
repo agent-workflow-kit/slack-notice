@@ -95,3 +95,40 @@ def test_a_real_sigterm_at_step_5_prints_one_envelope_and_exits_12(
             proc.kill()  # this Popen's own pid
             proc.wait()
         os.close(ready_r)
+
+
+ENTRY_CHILD = """
+import os, signal, sys, time
+from slack_notice import cli
+
+sys.argv = ["slack-notice", "send", "--json", "--dry-run", "--message", "m"]
+code = cli.main()  # the process entry: no argv given
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    os.kill(os.getpid(), sig)
+time.sleep(0.1)  # let every handler run
+sys.exit(code)
+"""
+
+
+def test_signals_after_main_returns_change_neither_stderr_nor_the_exit_code(
+    tmp_path: Path,
+) -> None:
+    src = str(Path(slack_notice.__file__).resolve().parent.parent)
+    env = {
+        "HOME": str(tmp_path),
+        "XDG_CONFIG_HOME": str(tmp_path),
+        "XDG_STATE_HOME": str(tmp_path),
+        "PYTHONPATH": src,
+        "PATH": "/usr/bin:/bin",
+    }
+    done = subprocess.run(
+        [sys.executable, "-c", ENTRY_CHILD],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=30,
+        check=False,
+    )
+    assert done.stderr == b""
+    assert done.returncode == 0

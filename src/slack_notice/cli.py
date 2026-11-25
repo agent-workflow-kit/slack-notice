@@ -545,9 +545,11 @@ class _SignalGate:
 
 
 def _set_disposition(number: int, disposition: Any) -> None:
-    """``signal.signal`` that never raises and never prints: CPython refuses with ``OSError``
-    ("ignored due to race condition", also reported as an unraisable error on stderr) when that
-    same signal is pending; nothing may reach stderr after a signal."""
+    """``signal.signal`` that never raises ``OSError`` and never prints.
+
+    CPython can report an unraisable error on stderr when the same signal is pending; swapping
+    the unraisable hook narrows that window, it does not close it. Nothing may reach stderr after
+    a signal."""
     previous_hook = sys.unraisablehook
     sys.unraisablehook = lambda _unraisable: None
     try:
@@ -559,8 +561,12 @@ def _set_disposition(number: int, disposition: Any) -> None:
 
 
 @contextmanager
-def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
+def _exit_on_signal(gate: _SignalGate, restore: bool = True) -> Iterator[None]:
     """SIGTERM, SIGINT and SIGHUP are handled once; the old handlers come back after.
+
+    ``restore=False`` (the process entry) installs a no-op handler after the block instead, so a
+    signal while the result is flushed and the interpreter ends changes nothing (no traceback,
+    no death by the default disposition).
 
     Before step 5 the first signal raises ``_Signalled`` (a ``BaseException``: no ``except
     Exception`` swallows it) and sets ``gate.fired``; every later one returns, so the first wins.
@@ -588,12 +594,30 @@ def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
         # disposition is changed.
         raise _Signalled(number)
 
-    saved = {number: signal.signal(number, handler) for number in SIGNALS}
+    saved: dict[int, Any] = {}
     try:
+        for number in SIGNALS:
+            saved[number] = signal.getsignal(number)  # before the install: a signal mid-install
+            signal.signal(number, handler)  # still finds it in ``saved``
         yield
     finally:
+        # Every signal is restored even when a pending signal raises from a call: the loop
+        # finishes, then the first exception is re-raised.
+        pending: BaseException | None = None
         for number, previous in saved.items():
-            _set_disposition(number, signal.SIG_DFL if previous is None else previous)
+            target = (
+                _ignore_signal if not restore else signal.SIG_DFL if previous is None else previous
+            )
+            try:
+                _set_disposition(number, target)
+            except BaseException as error:
+                pending = pending or error
+        if pending is not None:
+            raise pending
+
+
+def _ignore_signal(_number: int, _frame: object) -> None:
+    """The handler left after the process entry's run: a later signal changes nothing."""
 
 
 # --- dispatch ------------------------------------------------------------------------------------
@@ -907,17 +931,24 @@ def main(
     gateway: Gateway | None = None,
     streams: Streams | None = None,
 ) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
     gateway = SystemGateway() if gateway is None else gateway
     streams = system_streams() if streams is None else streams
     gate = _SignalGate()
+    # The process entry (no argv given: the console script and ``python -m``) leaves a no-op
+    # handler installed after the run, so a signal while the process ends changes nothing;
+    # in-process callers (tests) get the previous handlers back.
+    process_entry = argv is None
+    argv = list(sys.argv[1:] if argv is None else argv)
     try:
         # The handlers stay installed through the printing of the result: a signal before the
         # result print is 128+N with no output, one during or after it is ignored.
-        with _exit_on_signal(gate):
-            return _main(argv, env, gateway, streams, gate)
+        with _exit_on_signal(gate, restore=not process_entry):
+            code = _main(argv, env, gateway, streams, gate)
     except _Signalled as signalled:
         return 128 + signalled.number  # no envelope, no output, no log record
+    if gate.fired is not None and not gate.committed:
+        return 128 + gate.fired  # a _Signalled that cleanup swallowed must not be lost
+    return code
 
 
 def _main(
