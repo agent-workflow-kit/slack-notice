@@ -20,14 +20,11 @@ from typing import Any
 import pytest
 
 from slack_notice import cli, webhook
-from slack_notice.gateway import SourceRead, StateUnusable
+from slack_notice.gateway import SourceRead
 from tests.fake_gateway import (
     Attempt,
-    FakeConnection,
     FakeGateway,
     Reply,
-    cert_verify_error,
-    handshake_error,
 )
 from tests.secret_scan import Corpus, Secret, encodings
 from tests.send_harness import ENV_NAME, Sent, go, state_path, stdin_json, write_config
@@ -171,7 +168,11 @@ def add_attempts(name: str, attempts: list[Attempt], codes: tuple[int, ...] = (1
 # success, and every row of the Webhook edge table
 add_attempts("success", [OK], (0,))
 add_attempts("success after a 429", [reply(429), OK], (0,))
-add_attempts("success with extra keys", [Attempt(reply=Reply(body=b'{"ok":true,"u":"' + URL.encode() + b'"}'))], (0,))
+add_attempts(
+    "success with extra keys",
+    [Attempt(reply=Reply(body=b'{"ok":true,"u":"' + URL.encode() + b'"}'))],
+    (0,),
+)
 for _name, (_attempts, _code, _want) in ROWS.items():
     add_attempts("row: " + _name, _attempts, (_code,))
 
@@ -183,10 +184,12 @@ for _status in (200, 400, 429, 500, 302):
         "error-key": b'{"error":"' + URL.encode() + b'"}',
         "ok-value": b'{"ok":"' + URL.encode() + b'"}',
         "padded": b" " * 3000 + URL.encode(),
-        "split": b'{"error":"' + SECRET.path.encode()[:12] + b'\\u002f' + b'x"}',
+        "split": b'{"error":"' + SECRET.path.encode()[:12] + b"\\u002f" + b'x"}',
         "bad-utf8": b"\xff\xfe" + URL.encode(),
     }.items():
-        add_attempts(f"body {_status} {_label}", [Attempt(reply=Reply(status=_status, body=_body))] * 3)
+        add_attempts(
+            f"body {_status} {_label}", [Attempt(reply=Reply(status=_status, body=_body))] * 3
+        )
 for _framing in ("chunked", "eof"):
     add_attempts(
         f"body {_framing} url",
@@ -582,8 +585,15 @@ def test_the_credential_reaches_no_stream_no_file_and_no_record(
     argv = ["send", *mode, "--stdin-json"]
     if name == "dry run with the credential in the environment":
         argv.append("--dry-run")
-    sent = go(argv, fake_gateway, stdin=run.stdin, env=run.env, config=run.config, before=run.before,
-        validate_log=False)
+    sent = go(
+        argv,
+        fake_gateway,
+        stdin=run.stdin,
+        env=run.env,
+        config=run.config,
+        before=run.before,
+        validate_log=False,
+    )
     fake_gateway.release_stalls()
     assert sent.code in run.codes, (name, mode, sent.code, sent.stderr)
     hits = corpus_of(sent, fake_gateway, tmp_path).hits(SECRET)
@@ -595,6 +605,3 @@ def test_the_credential_reaches_no_stream_no_file_and_no_record(
         for _path, body in connection.requests:
             assert SECRET.segments[0].encode() not in body
     assert fake_gateway.violations == []
-
-
-_unused = (FakeConnection, StateUnusable, cert_verify_error, handshake_error)
