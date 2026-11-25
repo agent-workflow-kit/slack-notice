@@ -435,11 +435,24 @@ def _untranslated_plural(singular: str, plural: str, count: int) -> str:
     return singular if count == 1 else plural
 
 
-# argparse looks its texts up through gettext, which reads LANGUAGE, LC_ALL, LC_MESSAGES and LANG
-# and, with a ``messages`` catalog installed, changes the help text. No variable is read: the
-# lookup is replaced by the identity (argparse calls these two module names).
-setattr(argparse, "_", _untranslated)  # noqa: B010
-setattr(argparse, "ngettext", _untranslated_plural)  # noqa: B010
+@contextmanager
+def _untranslated_argparse() -> Iterator[None]:
+    """Turn argparse's text lookup into the identity for the length of one parse.
+
+    argparse looks its texts up through gettext, which reads LANGUAGE, LC_ALL, LC_MESSAGES and
+    LANG and, with a ``messages`` catalog installed, changes the help text. No variable is read
+    here: argparse calls these two module names, swapped for the identity and restored in a
+    ``finally`` (so importing this module changes nothing). Not thread-safe: parsing runs on the
+    main thread before the worker thread starts.
+    """
+    saved = (argparse._, argparse.ngettext)  # pyright: ignore[reportAttributeAccessIssue]
+    setattr(argparse, "_", _untranslated)  # noqa: B010
+    setattr(argparse, "ngettext", _untranslated_plural)  # noqa: B010
+    try:
+        yield
+    finally:
+        setattr(argparse, "_", saved[0])  # noqa: B010
+        setattr(argparse, "ngettext", saved[1])  # noqa: B010
 
 
 def _add_global_flags(parser: argparse.ArgumentParser, *, top: bool) -> None:
@@ -533,7 +546,8 @@ def json_requested(argv: Sequence[str]) -> bool:
 
 def parse(argv: Sequence[str]) -> argparse.Namespace:
     _prescan(argv)
-    args = build_parser().parse_args(list(argv))
+    with _untranslated_argparse():
+        args = build_parser().parse_args(list(argv))
     if args.command is None:
         raise usage_error("a command is required (send or validate)")
     if args.verbose and args.quiet:

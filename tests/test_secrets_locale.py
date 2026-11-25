@@ -170,3 +170,18 @@ def test_an_installed_catalog_and_the_locale_variables_cannot_change_the_help_te
     assert gettext.gettext("positional arguments") == "ZZPOS"  # the catalog really is active
     assert plain.startswith(b"usage: ") and b"ZZ" not in plain
     assert help_text("noisy") == plain
+
+
+def test_argparse_is_left_translated_outside_a_parse(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The untranslated texts apply only while ``cli.parse`` runs, never at import time."""
+    import argparse
+
+    seen: list[object] = []
+    for argv in (["send", "--help"], ["send", "--bogus"], ["validate"], ["--version"]):
+        try:
+            cli.parse(argv)
+        except BaseException as end:
+            seen.append(type(end))
+        assert argparse._ is gettext.gettext  # pyright: ignore
+        assert argparse.ngettext is gettext.ngettext  # pyright: ignore
+    assert len(seen) == 3  # help, error and version end the parse; "validate" returns
