@@ -6,10 +6,9 @@ send; otherwise the call waits until one second has passed since the file's modi
 ignoring a modification time in the future or more than one second old (so a clock that went
 backwards never causes a wait, and no wait exceeds one second). A spacing wait that is not
 shorter than the time left to the deadline ends the send at once (``SendLockTimeout``) without
-sleeping. The file's content is never
-read. ``SendLock.stamp`` writes one byte to a file of size 0 and sets the modification time to
-the gateway's wall time when the POST is about to start; ``release`` ends the lock at the end
-of step 6, before the log record.
+sleeping. The file's content is never read. ``SendLock.stamp`` writes one byte to a file of
+size 0 and sets the modification time to the gateway's wall time before each attempt's write;
+``release`` ends the lock at the end of step 6, before the log record.
 
 State problems never block or fail a send: an unusable file, a failing lock call or a failing
 stamp gives the one fixed warning of the run (``StateDir.warn``) and the send goes on, without

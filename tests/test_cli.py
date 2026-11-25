@@ -381,7 +381,7 @@ def test_global_flags_are_accepted_before_or_after_the_subcommand(
     assert run(argv, fake_gateway).code == 0
     (ctx,) = captured
     for name, value in expected.items():
-        assert getattr(ctx, name) == value
+        assert getattr(ctx if hasattr(ctx, name) else ctx.args, name) == value
 
 
 def test_a_global_flag_before_the_subcommand_is_not_overwritten_by_its_default(
@@ -400,7 +400,7 @@ def test_a_global_flag_before_the_subcommand_is_not_overwritten_by_its_default(
     ]
     assert run(argv, fake_gateway).code == 0
     (ctx,) = captured
-    assert (ctx.json, ctx.dry_run, ctx.verbose, ctx.quiet) == (True, True, True, False)
+    assert (ctx.json, ctx.dry_run, ctx.args.verbose, ctx.args.quiet) == (True, True, True, False)
     assert (ctx.config, ctx.actor, ctx.actor_source) == ("/x/c.yaml", "auto:before", "flag")
 
 
@@ -409,7 +409,7 @@ def test_defaults_when_no_global_flag_is_given(
 ) -> None:
     run(["send"], fake_gateway)
     (ctx,) = captured
-    assert (ctx.json, ctx.dry_run, ctx.verbose, ctx.quiet, ctx.config) == (
+    assert (ctx.json, ctx.dry_run, ctx.args.verbose, ctx.args.quiet, ctx.config) == (
         False,
         False,
         False,

@@ -469,7 +469,7 @@ def test_a_state_warning_raised_in_the_worker_is_written_by_the_main_thread_afte
     fake_gateway.script(OK)
     go(["send", "--stdin-json"], fake_gateway, stdin=HELLO, err=Sink())
     warned = [name for name, data in threads if STATE_WARNING.encode() in data]
-    assert warned == ["MainThread"]
+    assert warned == ["slack-notice-stderr"]  # never the worker, which holds the gate's lock
     order = [data for _, data in threads]
     sent_at = next(i for i, d in enumerate(order) if d.startswith(b"sent ("))
     warning_at = next(i for i, d in enumerate(order) if STATE_WARNING.encode() in d)

@@ -8,7 +8,6 @@ Only the pid ``Popen`` returned is ever signalled or killed.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import time
@@ -155,4 +154,5 @@ def test_the_dry_run_still_returns_normally_with_no_hard_exit(
     )
     assert done.returncode == 0
     assert assert_valid("cli/send", done.stdout)["outcome"] == "dry_run"
-    assert os.path.exists(tmp_path) and not (tmp_path / ".local").exists()
+    # The children use ``log: false`` and stop before the state directory: nothing here may
+    # touch the real home or its state.

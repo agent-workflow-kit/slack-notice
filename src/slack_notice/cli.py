@@ -15,8 +15,8 @@ Rules kept here (interface: Global flags, Output, Exit codes, Error envelope):
   envelope and the stderr line is tried on its own). Only a failure with no result (``--help``
   or ``--version`` output, an internal error) is exit 1.
 - Every message printed here is a fixed string: argparse's own messages quote the input and are
-  never shown. No variable is read from the environment (``env`` is only carried for later
-  issues; even the help width is fixed so argparse never reads ``COLUMNS``).
+  never shown. The environment is read only for the ``webhook_env`` variable, at step 5 of a real
+  send (even the help width is fixed so argparse never reads ``COLUMNS``).
 - stdout and stderr are written as UTF-8 with errors replaced, straight to the file descriptors
   (no buffer is left to fail at interpreter shutdown). After the result is printed
   (``Output.result_printed``) a write failure is ignored.
@@ -47,7 +47,7 @@ from slack_notice.config import (
     validate_config,
 )
 from slack_notice.deadline import Deadline, attempt_work, conclude
-from slack_notice.gateway import Gateway, SystemGateway
+from slack_notice.gateway import Gateway, SystemGateway, reserve_std_fds
 from slack_notice.log import StateDir, dedupe_key_sha256, log_result, message_sha256
 from slack_notice.payload import (
     EmptyMessage,
@@ -65,6 +65,12 @@ from slack_notice.payload import (
 )
 from slack_notice.render import Rendered, render
 from slack_notice.spacing import SendLock, SendLockTimeout, acquire
+
+# Real-time bounds (seconds): the result print is waited for at most PRINT_BOUND before the log
+# step and the exit; one advisory stderr write (a phase line, a state warning) at most SIDE_BOUND.
+# A stderr that does not take the write is then given up on for the rest of the run.
+PRINT_BOUND = 1.0
+SIDE_BOUND = 1.0
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
 ERROR_EXIT_CODES = frozenset({1, 2, 12, 20})
@@ -231,6 +237,7 @@ class Output:
         self._quiet = quiet
         self._gate = _SignalGate() if gate is None else gate
         self._lenient = False
+        self._stderr_abandoned = False
 
     def result_printed(self) -> None:
         """Called immediately BEFORE the result is written, once step 6 is over (a dry run has
@@ -277,8 +284,32 @@ class Output:
         if not self._quiet:
             self._advisory(line + "\n")
 
+    def abandon_stderr(self) -> None:
+        """Every later advisory stderr line (``side_line``) is skipped."""
+        self._stderr_abandoned = True
+
+    def side_line(self, text: str) -> None:
+        """An advisory stderr write that can never hold the process: it runs in a daemon thread
+        that is waited for at most ``SIDE_BOUND`` seconds of real time. A write that does not
+        finish marks stderr abandoned, so no later advisory line is tried. Failures are ignored."""
+        if self._stderr_abandoned:
+            return
+        done = threading.Event()
+
+        def write() -> None:
+            try:
+                self.err(text)
+            except Exception:
+                pass
+            finally:
+                done.set()
+
+        threading.Thread(target=write, name="slack-notice-stderr", daemon=True).start()
+        if not done.wait(SIDE_BOUND):
+            self._stderr_abandoned = True
+
     def warning(self, line: str) -> None:
-        self.err(line + "\n")
+        self.side_line(line + "\n")
 
     def error_line(self, line: str) -> None:
         self.err(line + "\n")
@@ -286,7 +317,7 @@ class Output:
     def phase(self, name: str, elapsed_ms: int) -> None:
         """A --verbose line: the phase and its elapsed milliseconds, nothing else."""
         if self._verbose:
-            self._advisory(f"{name}: {elapsed_ms} ms\n")
+            self.side_line(f"{name}: {elapsed_ms} ms\n")
 
     def finish(self) -> None:
         """One flush attempt of each stream; failures are ignored."""
@@ -308,8 +339,6 @@ class Context:
     output: Output
     json: bool
     dry_run: bool
-    verbose: bool
-    quiet: bool
     config: str | None
     home: str | None  # None only for `send --dry-run --config`, which needs no home
     actor: str
@@ -317,8 +346,16 @@ class Context:
     # Set from ``Verdict.gate_writing`` (``slack_notice.deadline``) by the send; an exit 1 then
     # reports unknown_outcome true and is logged.
     gate_writing: bool = field(default=False)
+    # The send's Deadline once it exists: an exception that escapes after a possible write is
+    # still told apart from one before it (``writing``).
+    deadline: Deadline | None = field(default=None, repr=False)
     _state: StateDir | None = field(default=None, repr=False)
     _deferred_warnings: list[str] = field(default_factory=list, repr=False)
+
+    @property
+    def writing(self) -> bool:
+        """A request may have been written (the verdict said so, or the gate is writing now)."""
+        return self.gate_writing or (self.deadline is not None and self.deadline.writing)
 
     def state_dir(self) -> StateDir:
         """The run's state directory handle (lazy: nothing is opened until a file is needed).
@@ -345,10 +382,7 @@ class Context:
         """Write the warnings a worker thread deferred (main thread, after the result)."""
         lines, self._deferred_warnings = self._deferred_warnings, []
         for line in lines:
-            try:
-                self.output.warning(line)
-            except (OSError, ValueError):
-                pass
+            self.output.warning(line)  # bounded and never raises
 
     def close_state(self) -> None:
         """Release the state directory descriptor (safe to call again, or when never opened)."""
@@ -681,7 +715,7 @@ def load_settings(ctx: Context) -> dict[str, Any]:
     same error with the config key name (or `?`) in details.key and a message that names the key
     and the rule (never the value).
     """
-    # The send calls this; TODO(#31), TODO(#32): validate.
+    # `validate` (#31, #32) reuses this.
     key: str | None = None
     message = ""
     settings: dict[str, Any] = {}
@@ -995,6 +1029,7 @@ def _send_and_report(
     at = started + settings["timeout"]
     locks: list[SendLock] = []
     deadline = Deadline(ctx.gateway, at=at, on_writing=_stamp_hook(ctx, locks))
+    ctx.deadline = deadline
     notification, rendered = _prepare(ctx, settings, started, progress)
     phase_start = ctx.gateway.monotonic()
     # Step 5. From here a signal is the deadline passing (outcome by phase), never an exit.
@@ -1025,7 +1060,10 @@ def _send_and_report(
         )
     finally:
         if lock is not None:
-            lock.release()  # before the log step: send.lock and log.lock are never both held
+            try:
+                lock.release()  # before the log step: send.lock and log.lock are never both held
+            except Exception:  # a state problem never replaces the verdict
+                ctx.state_dir().warn()
     ctx.gate_writing = verdict.gate_writing
     ctx.output.phase("send", _elapsed_ms(ctx, phase_start))
     return _verdict_result(ctx, verdict.outcome, verdict.error_class, progress, started)
@@ -1034,9 +1072,10 @@ def _send_and_report(
 def _real_send(ctx: Context, settings: dict[str, Any]) -> int:
     """Steps 3 to 7 of a send that is not a dry run. Never returns: the result is printed, then
     logged, then the process ends through ``gateway.exit_now`` (``conclude``), the one place
-    that may end it while a worker can still be blocked. Only an exit 2 (a ``--file`` problem
-    at step 3) and an exit 1 before any gate move are raised to ``_main`` instead: they are not
-    logged and the run ends by returning."""
+    that may end it while a worker can still be blocked. An exit 1 from the worker with the gate
+    idle is such a result too (``conclude`` and ``exit_now``). Only an exit 2 (a ``--file``
+    problem at step 3) and an exception on the main thread before any possible write are raised
+    to ``_main`` instead: they are not logged and the run ends by returning."""
     started = ctx.gateway.monotonic()  # step 3: the deadline starts here
     progress = _Progress()
     try:
@@ -1046,6 +1085,11 @@ def _real_send(ctx: Context, settings: dict[str, Any]) -> int:
             if error.exit_code not in (12, 20):
                 raise
             result = _error_result(ctx, error)
+        except Exception as exc:
+            if not ctx.writing:
+                raise  # before any possible write: exit 1, unknown_outcome false, not logged
+            ctx.gate_writing = True
+            result = _error_result(ctx, _internal_error(exc, gate_writing=True))
         _conclude(ctx, settings, started, progress, result)
     finally:
         ctx.close_state()
@@ -1056,6 +1100,8 @@ def _conclude(
     ctx: Context, settings: dict[str, Any], started: float, progress: _Progress, result: _Result
 ) -> None:
     """Step 7: print and flush, then the log record, then the exit (``deadline.conclude``)."""
+    # A signal from here on never cuts the result short (before it, an unarmed result is 128+N).
+    ctx.output.commit()
     notification, rendered = progress.notification, progress.rendered
     facts: dict[str, Any] = {
         "level": progress.level,
@@ -1069,8 +1115,16 @@ def _conclude(
         else dedupe_key_sha256(ctx.args.dedupe_key),
     }
 
+    printed = threading.Event()  # set by the print thread once the print and flush are over
+
+    def flush() -> None:
+        ctx.output.finish()
+        printed.set()
+
     def record() -> None:
         try:
+            if not printed.is_set():  # the print may still hold stderr: never write to it
+                ctx.output.abandon_stderr()
             ctx.flush_warnings()
             log_start = ctx.gateway.monotonic()
             log_result(
@@ -1089,7 +1143,9 @@ def _conclude(
         finally:
             ctx.close_state()
 
-    conclude(ctx.gateway, result.code, emit=result.emit, flush=ctx.output.finish, record=record)
+    conclude(
+        ctx.gateway, result.code, emit=result.emit, flush=flush, record=record, bound=PRINT_BOUND
+    )
 
 
 # TODO(#31), TODO(#32): validate.
@@ -1152,8 +1208,6 @@ def _run(
         output=Output(streams, verbose=args.verbose, quiet=args.quiet, gate=gate),
         json=json_requested(argv),
         dry_run=args.dry_run,
-        verbose=args.verbose,
-        quiet=args.quiet,
         config=args.config,
         home=home,
         actor=actor,
@@ -1208,6 +1262,8 @@ def main(
     gateway = SystemGateway() if gateway is None else gateway
     streams = system_streams() if streams is None else streams
     gate = _SignalGate()
+    if argv is None:
+        reserve_std_fds()  # the process entry: before anything opens a descriptor
     # The process entry (no argv given: the console script and ``python -m``) leaves a no-op
     # handler installed after the run, so a signal while the process ends changes nothing;
     # in-process callers (tests) get the previous handlers back.
@@ -1248,7 +1304,7 @@ def _main(
     except CliError as error:
         outcome, code = error, error.exit_code
     except Exception as exc:
-        outcome = _internal_error(exc, gate_writing=bool(holder and holder[0].gate_writing))
+        outcome = _internal_error(exc, gate_writing=bool(holder and holder[0].writing))
         code = 1
     output = holder[0].output if holder else Output(streams, verbose=False, quiet=False, gate=gate)
     try:

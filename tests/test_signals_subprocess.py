@@ -1,6 +1,6 @@
 """One real-process check of the step 5 signal rule (#27): a real SIGTERM, a really blocked worker.
 
-The child runs the pieces #28 will wire (handler gate, ``Deadline.run`` on a daemon worker that
+The child runs the pieces #28 wired (handler gate, ``Deadline.run`` on a daemon worker that
 blocks on an event nothing sets, ``conclude`` with the system gateway and its ``os._exit``). It
 writes a readiness marker once the worker is blocked, and the test signals only the pid ``Popen``
 returned. Exit 12 with exactly one envelope on stdout is expected, and the child must end by

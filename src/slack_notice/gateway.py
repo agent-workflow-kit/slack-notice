@@ -784,3 +784,21 @@ class SystemGateway:
             return os.path.join(os.getcwd(), path)
         except OSError:
             return os.path.join(".", path)
+
+
+def reserve_std_fds(fds: tuple[int, ...] = (0, 1, 2)) -> None:
+    """Reopen any closed descriptor of ``fds`` on /dev/null, so a socket opened later never gets
+    number 0, 1 or 2 and the result is never written into it. Open descriptors are not touched."""
+    for fd in fds:
+        try:
+            os.fstat(fd)
+            continue
+        except OSError:
+            pass
+        try:
+            new = os.open(os.devnull, os.O_RDWR)
+            if new != fd:
+                os.dup2(new, fd)
+                os.close(new)
+        except OSError:
+            pass
