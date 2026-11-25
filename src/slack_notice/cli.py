@@ -63,8 +63,8 @@ from slack_notice.payload import (
     sanitize_notification,
     validate_notification,
 )
-from slack_notice.render import Rendered, render
-from slack_notice.spacing import SendLock, SendLockTimeout, acquire
+from slack_notice.render import MAX_BODY_BYTES, Rendered, render
+from slack_notice.spacing import SPACING_S, SendLock, SendLockTimeout, acquire
 
 # Real-time bounds (seconds): the result print is waited for at most PRINT_BOUND before the log
 # step and the exit; one advisory stderr write (a phase line, a state warning) at most SIDE_BOUND.
@@ -1263,6 +1263,17 @@ def _credential_check(
     return _check("credential", True, CREDENTIAL_OK_MESSAGE), target
 
 
+def _limits(settings: dict[str, Any]) -> dict[str, Any]:
+    """The effective limits (interface: validate): from the validated settings only, so nothing
+    is read from the environment and no state is touched. max_bytes and spacing are fixed."""
+    return {
+        "max_chars": settings["max_chars"],
+        "max_bytes": MAX_BODY_BYTES,
+        "timeout_s": float(settings["timeout"]),
+        "spacing_s": float(SPACING_S),
+    }
+
+
 def _print_checks(ctx: Context, settings: dict[str, Any], checks: list[dict[str, Any]]) -> int:
     """The validate result: the document (``--json``) or one line per check; the exit code is
     the failing check's. A failed check is reported here, never as an error envelope."""
@@ -1271,7 +1282,12 @@ def _print_checks(ctx: Context, settings: dict[str, Any], checks: list[dict[str,
     ctx.output.result_printed()  # before the print: the print is the last step
     if ctx.json:
         ctx.output.json_document(
-            {"ok": failed is None, "enabled": settings["enabled"], "checks": checks}
+            {
+                "ok": failed is None,
+                "enabled": settings["enabled"],
+                "checks": checks,
+                "limits": _limits(settings),
+            }
         )
         return code
     for entry in checks:
