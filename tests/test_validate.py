@@ -153,7 +153,7 @@ def hostile() -> list[tuple[str, str | None]]:
 
 @pytest.mark.parametrize(("label", "value"), hostile(), ids=[h[0] for h in hostile()])
 def test_every_wrong_credential_fails_the_credential_check_and_exits_12(
-    label: str, value: str | None, fake_gateway: FakeGateway
+    label: str, value: str | None, fake_gateway: FakeGateway, tmp_path: Path
 ) -> None:
     env = {} if value is None else {ENV_NAME: value}
     sent = go(VALIDATE, fake_gateway, env=env)
@@ -163,6 +163,9 @@ def test_every_wrong_credential_fails_the_credential_check_and_exits_12(
     corpus = Corpus()
     corpus.add("stdout", sent.out)
     corpus.add("stderr", sent.err)
+    corpus.add_tree(tmp_path)
+    corpus.add("gateway.events", "\n".join(fake_gateway.events))
+    corpus.add("gateway.calls", "\n".join(fake_gateway.calls))
     assert corpus.hits(SECRET) == []
 
 
@@ -308,12 +311,14 @@ def test_a_failed_credential_check_still_reads_only_the_credential_variable(
 def test_the_default_environment_comes_from_the_gateway_only_when_the_credential_is_reached(
     tmp_path: Path,
 ) -> None:
-    good = FakeGateway(home=str(tmp_path / "g1"), environment={ENV_NAME: URL})
-    Path(good._home).mkdir(mode=0o700)  # pyright: ignore
+    good_home = tmp_path / "g1"
+    good_home.mkdir(mode=0o700)
+    good = FakeGateway(home=str(good_home), environment={ENV_NAME: URL})
     sent = go(VALIDATE, good, env=None)
     assert sent.code == 0 and good.calls.count("environ") == 1
-    broken = FakeGateway(home=str(tmp_path / "g2"), environment={ENV_NAME: URL})
-    Path(broken._home).mkdir(mode=0o700)  # pyright: ignore
+    broken_home = tmp_path / "g2"
+    broken_home.mkdir(mode=0o700)
+    broken = FakeGateway(home=str(broken_home), environment={ENV_NAME: URL})
     sent = go(VALIDATE, broken, env=None, config=write_config(tmp_path, "max_chars: 5\n"))
     assert sent.code == 2 and "environ" not in broken.calls
 
@@ -517,6 +522,7 @@ def test_the_webhook_url_is_in_no_stream_and_no_file(
     elif label == "bad config":
         config = write_config(tmp_path, "max_chars: 5\n")
     sent = go(["validate", *flags], fake_gateway, env=env, config=config)
+    assert sent.code == {"good": 0, "wrong shape": 12, "unset": 12, "bad config": 2}[label]
     corpus = Corpus()
     corpus.add("stdout", sent.out)
     corpus.add("stderr", sent.err)

@@ -744,7 +744,7 @@ def load_settings(ctx: Context) -> dict[str, Any]:
     same error with the config key name (or `?`) in details.key and a message that names the key
     and the rule (never the value).
     """
-    # `validate` (#31, #32) reuses this.
+    # `validate` (#32) reuses this.
     key: str | None = None
     message = ""
     settings: dict[str, Any] = {}
@@ -1177,9 +1177,9 @@ def _conclude(
 
 CONFIG_OK_MESSAGE = "configuration is valid"
 CREDENTIAL_OK_MESSAGE = "the webhook credential is set and has the form of a workflow trigger URL"
-# The exit code of a failed check (interface: validate): config is 2 (and never reaches here: an
-# unloadable config is the error envelope), every other check is 12.
-CHECK_EXIT_CODES = {"config": 2, "credential": 12, "test_message": 12}
+# The exit code of a failed check (interface: validate): config is 2 but never reaches here (an
+# unloadable config is the error envelope), so only these two checks can fail.
+CHECK_EXIT_CODES = {"credential": 12, "test_message": 12}
 
 
 def _check(name: str, ok: bool, message: str) -> dict[str, Any]:
