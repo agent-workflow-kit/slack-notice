@@ -1172,7 +1172,7 @@ def test_post_with_an_invalid_target_fails_with_a_fixed_message(
         connection.post("/triggers/T1/SECRET TOKEN", b"{}")
     assert "SECRET" not in str(info.value)
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None  # raised outside the handler: nothing is chained
 
 
 def test_post_with_a_non_ascii_target_fails_with_a_fixed_message(
@@ -1186,7 +1186,7 @@ def test_post_with_a_non_ascii_target_fails_with_a_fixed_message(
         assert "SECRET" not in text
         assert "/triggers" not in text
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None  # raised outside the handler: nothing is chained
 
 
 def served_response(

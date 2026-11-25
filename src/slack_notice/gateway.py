@@ -436,12 +436,17 @@ class _HttpsConnection:
             "Connection": "close",
             "User-Agent": self._user_agent,
         }
+        refused = False
         try:
             self._conn.request("POST", path, body=body, headers=headers)
         except (http.client.InvalidURL, UnicodeEncodeError):
             # The original message (or the encode error's ``object``) quotes the request
             # target, which holds the webhook secret.
-            raise http.client.InvalidURL("invalid request") from None
+            refused = True
+        if refused:
+            # Raised outside the handler: ``from None`` would only hide the original from a
+            # traceback, it would stay on ``__context__`` for any code that walks the chain.
+            raise http.client.InvalidURL("invalid request")
 
     def getresponse(self) -> Response:
         return _HttpsResponse(self._conn.getresponse())
