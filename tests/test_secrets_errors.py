@@ -25,7 +25,7 @@ from slack_notice.gateway import HomeLookupError, MalformedChunkSize, SystemGate
 from slack_notice.log import STATE_WARNING
 from tests.fake_gateway import Attempt, FakeGateway, Reply
 from tests.secret_scan import Corpus, Secret
-from tests.send_harness import go
+from tests.send_harness import go, state_path
 from tests.test_send import HELLO, OK
 
 SECRET = Secret()
@@ -92,6 +92,21 @@ def test_a_worker_exception_is_not_printed_by_the_thread_machinery(
     assert seen.out == "" and seen.err == ""  # nothing went to the real descriptors either
 
 
+FRESH: dict[str, Any] = {
+    "InvalidURL": lambda: http.client.InvalidURL(URL),
+    "ValueError": lambda: ValueError(URL),
+}
+
+
+def hook_exit(hook: str, name: str) -> int:
+    """The exact exit code: the state directory and the send lock are part of the send (a bug
+    there is exit 1), the log is best effort; the spacing reads the modification time and only
+    catches OSError and ValueError, so an ``InvalidURL`` there is exit 1."""
+    if hook in ("state_dir_error", "lock_error"):
+        return 1
+    return 1 if (hook, name) == ("mtime_error", "InvalidURL") else 0
+
+
 @pytest.mark.parametrize("name", sorted(CARRIERS))
 @pytest.mark.parametrize(
     "hook",
@@ -107,21 +122,33 @@ def test_a_worker_exception_is_not_printed_by_the_thread_machinery(
 def test_the_state_lock_and_log_paths_print_only_the_fixed_warning(
     name: str, hook: str, fake_gateway: FakeGateway, tmp_path: Path
 ) -> None:
-    setattr(fake_gateway, hook, CARRIERS[name])
+    raised = FRESH[name]()
+    setattr(fake_gateway, hook, raised)
+    if hook == "truncate_error":
+        fake_gateway.write_limit = 5  # a short write, so the cut back runs
+    if hook == "mtime_error":
+        # the spacing wait reads the modification time only of a non-empty send.lock
+        directory = state_path(fake_gateway)
+        directory.mkdir(parents=True, mode=0o700)
+        (directory / "send.lock").write_bytes(b"x")
+        (directory / "send.lock").chmod(0o600)
     fake_gateway.allow_unconsumed_script = True
     fake_gateway.script(OK)
     sent = go(
         ["send", "--stdin-json"], fake_gateway, stdin=HELLO, env=SECRET.env, validate_log=False
     )
-    assert sent.code in (0, 1)
-    assert sent.stderr in ("", STATE_WARNING + "\n") or sent.stderr.startswith(
-        ("sent (", "internal: internal error (")
-    )
+    assert raised.__traceback__ is not None  # the injected fault was really reached
+    assert sent.code == hook_exit(hook, name), sent.stderr
+    if sent.code == 1:
+        assert sent.stderr == f"internal: internal error ({name})\n"
+    else:
+        lines = sent.stderr.splitlines()  # the warning may come before or after the result
+        assert sum(line.startswith("sent (") for line in lines) == 1, sent.stderr
+        assert [line for line in lines if not line.startswith("sent (")] in ([], [STATE_WARNING])
     corpus = Corpus()
     corpus.add_tree(tmp_path)
     corpus.add("out", sent.out + sent.err)
     assert corpus.hits(SECRET) == []
-    assert name not in sent.stderr or sent.stderr.startswith("internal")
 
 
 @pytest.mark.parametrize("phase", ["connect_error", "tls_error", "write_error"])
@@ -218,7 +245,7 @@ def test_a_hostile_stream_that_raises_the_url_is_not_echoed_back(fake_gateway: F
     sent = go(
         ["send", "--stdin-json"], fake_gateway, stdin=HELLO, env=SECRET.env, out=Broken(), err=kept
     )
-    assert sent.code in (0, 1, 12)
+    assert sent.code == 0
     assert Corpus(blobs={"e": kept.getvalue()}).hits(SECRET) == []
 
 

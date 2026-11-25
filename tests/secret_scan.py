@@ -2,10 +2,14 @@
 
 ``Secret`` builds a fake webhook URL from parts at runtime (no secret-looking literal on disk)
 and every needle a leak could take: the URL, the host plus path, the path, each segment and each
-run of segments, and for each of those the percent-encoded, base64 (standard and URL-safe,
-padded or not, at all three byte alignments), hex and reversed forms. ``scan`` looks for every
-needle in named byte blobs; ``Corpus.collect`` gathers the blobs a run could leave anywhere: the
-streams, every file name and file content under a directory tree, and extra text.
+run of segments; for each of those the percent-encoded, base64 (standard and URL-safe, padded or
+not, at all three byte alignments), hex and reversed forms, the lower- and upper-case forms and
+the UTF-16 and UTF-32 encodings (both byte orders); and every run of 8 contiguous characters of
+a segment that is at least 8 long (a cut or a masked part of a segment). ``scan`` looks for every
+needle in each named byte blob, in the blob with its whitespace removed (a wrapped line), and in
+the concatenation of all blobs in both orders (a value split across two streams). ``Corpus``
+gathers the blobs a run could leave anywhere: the streams, every file name and file content under
+a directory tree, and extra text.
 
 The scanner is only worth anything if it can fail: the tests plant each needle form and assert
 the scan reports it.
@@ -14,7 +18,7 @@ the scan reports it.
 from __future__ import annotations
 
 import base64
-import binascii
+import functools
 import os
 import stat
 from collections.abc import Iterable, Mapping
@@ -23,6 +27,9 @@ from pathlib import Path
 from urllib.parse import quote
 
 HOST = "hooks.slack.com"
+EDGE = 1024  # bytes of each blob's start and end that the joined blobs keep
+WINDOW = 8  # the shortest run of a segment that counts as a part of it
+_WHITESPACE = b" \t\r\n\x0b\x0c"
 
 
 @dataclass(frozen=True)
@@ -71,6 +78,29 @@ class Secret:
         found.setdefault("/triggers/", "path prefix")
         return found
 
+    def byte_needles(self) -> dict[bytes, str]:
+        """needle bytes -> label: every text needle as UTF-8, the case forms, the wide encodings
+        and the 8-character windows of the long segments (computed once per secret)."""
+        return _byte_needles(self)
+
+    def _compute_byte_needles(self) -> dict[bytes, str]:
+        found: dict[bytes, str] = {text.encode(): label for text, label in self.needles().items()}
+        for piece in [*self.pieces(), HOST]:
+            for case, text in (("raw", piece), ("lower", piece.lower()), ("upper", piece.upper())):
+                found.setdefault(text.encode(), f"{case}({piece[:12]}...)")
+                for codec in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be"):
+                    found.setdefault(text.encode(codec), f"{codec}-{case}({piece[:12]}...)")
+        for segment in self.segments:
+            for start in range(len(segment) - WINDOW + 1):  # none for a short segment
+                window = segment[start : start + WINDOW]
+                found.setdefault(window.encode(), f"window({window})")
+        return found
+
+
+@functools.cache
+def _byte_needles(secret: Secret) -> dict[bytes, str]:
+    return secret._compute_byte_needles()  # pyright: ignore[reportPrivateUsage]
+
 
 def _b64_slice(data: bytes, shift: int, *, urlsafe: bool) -> str:
     """The base64 characters that depend only on ``data``, when ``shift`` unknown bytes (0 to 2)
@@ -107,19 +137,34 @@ def encodings(piece: str) -> dict[str, str]:
 
 
 def scan(blobs: Mapping[str, bytes], secret: Secret) -> list[str]:
-    """Every ``blob name: needle form`` found. Text and bytes are searched as UTF-8, and as the
-    blob with its escapes undone for the JSON and percent forms a log or document could use."""
+    """Every ``blob name: needle form`` found.
+
+    Each blob is searched as it is and with its whitespace removed (a value wrapped over lines).
+    The ends of the blobs (1 KiB each) are also joined, in order and reversed, and searched as
+    one: a needle found there and in no single blob was split between two of them (stdout and
+    stderr, say).
+    """
+    needles = secret.byte_needles()
     hits: list[str] = []
-    needles = secret.needles()
-    for name, data in blobs.items():
-        views = [data]
-        try:
-            views.append(data.decode("utf-8", "replace").encode("utf-8", "replace"))
-        except (UnicodeError, binascii.Error):  # pragma: no cover - scanning must not crash
-            pass
-        for text, label in needles.items():
-            if any(text.encode("utf-8") in view for view in views):
-                hits.append(f"{name}: {label}")
+    found: set[bytes] = set()
+    # only the ends of the blobs can hold a value that is split between two of them
+    ends = [
+        data if len(data) <= 2 * EDGE else data[:EDGE] + b"\0" + data[-EDGE:]
+        for data in blobs.values()
+    ]
+    joined = {"all blobs": b"".join(ends), "all blobs reversed": b"".join(reversed(ends))}
+    for names in (blobs, joined):
+        for name, data in names.items():
+            views = {name: data}
+            plain = data.translate(None, _WHITESPACE)
+            if plain != data:
+                views[f"{name} (whitespace removed)"] = plain
+            for view_name, view in views.items():
+                for needle, label in needles.items():
+                    if needle in view and (names is blobs or needle not in found):
+                        hits.append(f"{view_name}: {label}")
+                        if names is blobs:
+                            found.add(needle)
     return hits
 
 

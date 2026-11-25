@@ -56,6 +56,19 @@ class RecordingEnviron(MutableMapping[str, str]):
         return dict(self.store)
 
 
+EXIT = {
+    "sent": 0,
+    "429 then sent": 0,
+    "500": 12,
+    "network error": 12,
+    "certificate": 12,
+    "unset credential": 12,
+    "refusal": 20,
+    "dry run": 0,
+    "verbose": 0,
+}
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -79,7 +92,7 @@ def test_the_code_never_touches_os_environ_during_a_send(
     gateway = gateway_in(tmp_path, "g", *attempts)
     sent = go(["send", *flags, "--stdin-json"], gateway, stdin=stdin, env=env)
     assert spy.log == [], (case, spy.log)
-    assert sent.code in (0, 12, 20)
+    assert sent.code == EXIT[case], (case, sent.code)
 
 
 def test_the_ca_paths_and_the_tls_context_never_touch_os_environ(

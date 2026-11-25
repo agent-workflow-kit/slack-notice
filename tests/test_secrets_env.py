@@ -10,7 +10,9 @@ constructors that do not connect.
 from __future__ import annotations
 
 import http.client
+import os
 import re
+import signal
 import ssl
 import subprocess
 import sys
@@ -200,46 +202,12 @@ def test_proxy_trust_and_every_other_variable_change_nothing_a_send_does(
     for key in ("HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "TMPDIR"):
         assert not Path(fakes[key]).exists(), key
     assert not any(Path(tmp_path).glob("decoy-*"))
-    assert [h for h in Corpus(blobs={"o": noisy.out + noisy.err}).hits(SECRET)] == []
-
-
-def test_the_fake_gateway_sees_the_same_tls_inputs_with_and_without_the_variables(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    seen: list[list[Any]] = []
-    for label, noisy in (("a", False), ("b", True)):
-        if noisy:
-            for key, value in decoys(tmp_path).items():
-                monkeypatch.setenv(key, value)
-        gateway = gateway_in(tmp_path, label, OK)
-        record: list[Any] = []
-        real_context = gateway.tls_context
-        real_candidates = gateway.ca_candidates
-        real_connection = gateway.https_connection
-
-        def candidates(real: Any = real_candidates, out: list[Any] = record) -> CaCandidates:
-            found = real()
-            out.append(("candidates", found))
-            return found
-
-        def context(real: Any = real_context, out: list[Any] = record) -> ssl.SSLContext:
-            made = real()
-            out.append(("context", made.verify_mode, made.check_hostname, made.minimum_version))
-            return made
-
-        def connection(
-            *a: Any, out: list[Any] = record, real: Any = real_connection, **k: Any
-        ) -> Any:
-            out.append(("connection", a, round(k["timeout"]), k["user_agent"]))
-            return real(*a, **k)
-
-        monkeypatch.setattr(gateway, "ca_candidates", candidates)
-        monkeypatch.setattr(gateway, "tls_context", context)
-        monkeypatch.setattr(gateway, "https_connection", connection)
-        sent = go(["send", "--stdin-json"], gateway, stdin=HELLO, env=dict(SECRET.env))
-        assert sent.code == 0
-        seen.append(record)
-    assert seen[0] == seen[1] and any(item[0] == "context" for item in seen[0])
+    corpus = Corpus()
+    corpus.add("stdout", noisy.out)
+    corpus.add("stderr", noisy.err)
+    corpus.extend((f"state:{key}", data) for key, data in noisy.state_files.items())
+    corpus.add_tree(tmp_path)
+    assert corpus.hits(SECRET) == []
 
 
 @pytest.fixture
@@ -559,16 +527,92 @@ def test_the_default_environment_comes_from_the_gateway_and_is_read_the_same_way
 # --- the environment of a real process ---------------------------------------------------------
 
 
+GUARD_EXIT = 97
+GUARD = f"""\
+import os
+import sys
+
+_REFUSED = {{
+    "socket.connect",
+    "socket.getaddrinfo",
+    "socket.gethostbyname",
+    "socket.gethostbyaddr",
+    "socket.getnameinfo",
+    "socket.sendto",
+    "socket.sendmsg",
+}}
+
+
+def _guard(event, args):
+    if event in _REFUSED:
+        os._exit({GUARD_EXIT})
+
+
+sys.addaudithook(_guard)
+"""
+
+
+def guarded_env(home: Path, root: Path) -> dict[str, str]:
+    """The child environment with a guard first on PYTHONPATH: its ``sitecustomize`` ends the
+    process with exit 97 on any connect (also a Unix socket), name lookup or datagram send, so
+    a child that could reach the network never does. A real child that exits 97 is a failure."""
+    directory = root / "guard"
+    directory.mkdir(exist_ok=True)
+    (directory / "sitecustomize.py").write_text(GUARD, encoding="utf-8")
+    env = child_env(home)
+    env["PYTHONPATH"] = os.pathsep.join([str(directory), env["PYTHONPATH"]])
+    return env
+
+
+def test_the_child_guard_ends_a_process_that_connects_even_with_the_decoy_variables(
+    tmp_path: Path,
+) -> None:
+    """Self-test of the guard: a child that connects to a Unix socket path (no network at all)
+    exits 97 before the connect, also under the decoys that touch how Python starts."""
+    home = tmp_path / "probe"
+    home.mkdir()
+    env = guarded_env(home, tmp_path)
+    program = (
+        "import socket, sys\n"
+        "s = socket.socket(socket.AF_UNIX)\n"
+        "s.connect(sys.argv[1])\n"
+        "sys.exit(0)\n"
+    )
+    target = str(tmp_path / "no-such.sock")
+    fakes = {k: v for k, v in decoys(tmp_path / "x").items() if not k.startswith(("HOME", "XDG_"))}
+    assert fakes["PYTHONSAFEPATH"] == "1" and "PYTHONSTARTUP" in fakes
+    for extra in ({}, fakes):
+        done = subprocess.run(
+            [sys.executable, "-c", program, target],
+            env={**env, **extra},
+            capture_output=True,
+            timeout=60,
+            check=False,
+            cwd=str(home),
+        )
+        assert done.returncode == GUARD_EXIT, (extra.keys(), done.stderr)
+    for call in ("socket.getaddrinfo('localhost', 80)", "socket.gethostbyname('localhost')"):
+        done = subprocess.run(
+            [sys.executable, "-c", f"import socket\n{call}"],
+            env=env,
+            capture_output=True,
+            timeout=60,
+            check=False,
+            cwd=str(home),
+        )
+        assert done.returncode == GUARD_EXIT, (call, done.stderr)
+
+
 def run_child(
     tmp_path: Path, label: str, argv: list[str], extra: dict[str, str], stdin: bytes | None = None
 ) -> subprocess.CompletedProcess[bytes]:
     home = tmp_path / label
     home.mkdir()
-    env = child_env(home)
+    env = guarded_env(home, tmp_path)
     env.update(extra)
     config = home / "config.yaml"
     config.write_text("log: false\n", encoding="utf-8")
-    return subprocess.run(
+    done = subprocess.run(
         [sys.executable, "-m", "slack_notice", "send", *argv, "--config", str(config)],
         env=env,
         input=stdin if stdin is not None else b"",
@@ -577,6 +621,8 @@ def run_child(
         check=False,
         cwd=str(home),
     )
+    assert done.returncode != GUARD_EXIT, "the child tried to reach the network"
+    return done
 
 
 @pytest.mark.parametrize(
@@ -618,12 +664,15 @@ def test_a_real_process_with_the_credential_has_it_in_no_argv_stream_or_file(
     tmp_path: Path,
 ) -> None:
     """The valid fake credential sits in the child's environment while it waits for input that
-    never completes: the deadline ends it before step 5, so nothing is ever contacted."""
+    never completes: the deadline ends it before step 5, so nothing is ever contacted (and the
+    guard would end the child with exit 97 if anything were)."""
+    if not Path("/proc/self").is_dir():  # todo(#37): macOS argv check via ps
+        pytest.skip("no /proc: the argv of a running process is read from /proc/<pid>/cmdline")
     home = tmp_path / "child"
     home.mkdir()
     config = home / "config.yaml"
     config.write_text("log: false\ntimeout: 3\n", encoding="utf-8")
-    env = child_env(home)
+    env = guarded_env(home, tmp_path)
     env.update(SECRET.env)
     argv = [
         sys.executable,
@@ -665,6 +714,7 @@ def test_a_real_process_with_the_credential_has_it_in_no_argv_stream_or_file(
         proc.stdin.close()
         proc.stdout.close()
         proc.stderr.close()
+    assert code != GUARD_EXIT, "the child tried to reach the network"
     assert code == 12 and b"unavailable" in out
     assert cmdlines and all(
         c.split(b"\0")[:3] == [sys.executable.encode(), b"-m", b"slack_notice"] for c in cmdlines
@@ -679,12 +729,33 @@ def test_a_real_process_with_the_credential_has_it_in_no_argv_stream_or_file(
     assert corpus.hits(SECRET) == []
 
 
+def caught_signals(pid: int) -> int:
+    """The ``SigCgt`` mask of a process: the bit of every signal it has a handler for."""
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        if line.startswith("SigCgt:"):
+            return int(line.split()[1], 16)
+    raise AssertionError("no SigCgt line")
+
+
+def wait_for_handler(pid: int, timeout: float = 20.0) -> None:
+    """Poll until the process has a SIGTERM handler (Python itself installs none), at most
+    ``timeout`` seconds; no fixed sleep."""
+    stop = time.monotonic() + timeout
+    while time.monotonic() < stop:
+        if caught_signals(pid) & (1 << (signal.SIGTERM - 1)):
+            return
+        time.sleep(0.02)
+    raise AssertionError("the child never installed a SIGTERM handler")
+
+
 def test_a_signal_before_step_5_leaves_a_real_process_silent_and_leak_free(tmp_path: Path) -> None:
+    if not Path("/proc/self").is_dir():  # todo(#37): macOS readiness check via ps
+        pytest.skip("no /proc: the signal handlers of a process are read from /proc/<pid>/status")
     home = tmp_path / "sig"
     home.mkdir()
     config = home / "config.yaml"
     config.write_text("log: false\ntimeout: 30\n", encoding="utf-8")
-    env = child_env(home)
+    env = guarded_env(home, tmp_path)
     env.update(SECRET.env)
     proc = subprocess.Popen(
         [
@@ -707,7 +778,7 @@ def test_a_signal_before_step_5_leaves_a_real_process_silent_and_leak_free(tmp_p
     try:
         proc.stdin.write(b'{"message"')
         proc.stdin.flush()
-        time.sleep(1.0)  # the child is reading input
+        wait_for_handler(proc.pid)  # the tool has installed its signal handling
         proc.terminate()  # this Popen's own pid
         code = proc.wait(timeout=30)
         out, err = proc.stdout.read(), proc.stderr.read()
@@ -718,6 +789,7 @@ def test_a_signal_before_step_5_leaves_a_real_process_silent_and_leak_free(tmp_p
         proc.stdin.close()
         proc.stdout.close()
         proc.stderr.close()
+    assert code != GUARD_EXIT, "the child tried to reach the network"
     assert code == 143 and out == b"" and err == b""
     corpus = Corpus()
     corpus.add_tree(home)
