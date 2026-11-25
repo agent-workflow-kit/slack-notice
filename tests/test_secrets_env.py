@@ -681,19 +681,28 @@ def sample_cmdlines(
 
 
 def check_argv_samples(samples: list[bytes]) -> None:
-    """Between fork and exec (and when the process is ending) ``/proc/<pid>/cmdline`` reads as
-    empty bytes, so an empty sample says nothing and is ignored. At least one sample must have a
-    command line, and every such sample must start with the interpreter, ``-m`` and the module
-    name. Whether a sample holds the credential is checked by the caller's corpus."""
+    """``/proc/<pid>/cmdline`` reads as empty bytes while the child is still inside exec or once
+    it is exiting (a zombie until it is reaped), so an empty sample says nothing and is ignored.
+    At least one sample must have a command line, and every such sample must start with the
+    interpreter, ``-m`` and the module name. Whether a sample holds the credential is checked by
+    the caller's corpus."""
     seen = [sample for sample in samples if sample]
     assert seen, f"no sample of the command line was non-empty ({len(samples)} samples)"
     for sample in seen:
         assert sample.split(b"\0")[:3] == [sys.executable.encode(), b"-m", b"slack_notice"]
 
 
+def argv_corpus(samples: list[bytes], corpus: Corpus | None = None) -> Corpus:
+    """A corpus holding every argv sample, empty ones included, as ``argv<index>``."""
+    corpus = Corpus() if corpus is None else corpus
+    for index, sample in enumerate(samples):
+        corpus.add(f"argv{index}", sample)
+    return corpus
+
+
 def test_empty_argv_samples_are_ignored_but_all_empty_samples_fail() -> None:
     good = b"\0".join([sys.executable.encode(), b"-m", b"slack_notice", b"send"]) + b"\0"
-    check_argv_samples([b"", good, good])  # the fork-before-exec sample is the first one
+    check_argv_samples([b"", good, good])  # an empty sample may come before or after real ones
     check_argv_samples([good, b""])
     with pytest.raises(AssertionError, match="non-empty"):
         check_argv_samples([b"", b"", b""])
@@ -717,9 +726,9 @@ def test_the_credential_in_any_argv_sample_is_found_even_after_empty_samples() -
     )
     samples = [b"", leaked]
     check_argv_samples(samples)  # the prefix is right: the corpus is what finds the credential
-    corpus = Corpus()
-    for index, sample in enumerate(samples):
-        corpus.add(f"argv{index}", sample)
+    corpus = argv_corpus(samples)
+    assert set(corpus.blobs) == {"argv0", "argv1"}  # every sample, the empty one too
+    assert corpus.blobs["argv0"] == b""
     assert corpus.hits(SECRET) != []
 
 
@@ -789,11 +798,9 @@ def test_a_real_process_with_the_credential_has_it_in_no_argv_stream_or_file(
     assert code != GUARD_EXIT, "the child tried to reach the network"
     assert code == 12 and b"unavailable" in out
     check_argv_samples(cmdlines)
-    corpus = Corpus()
+    corpus = argv_corpus(cmdlines)
     corpus.add("stdout", out)
     corpus.add("stderr", err)
-    for index, cmdline in enumerate(cmdlines):
-        corpus.add(f"argv{index}", cmdline)
     corpus.add("argv", "\0".join(argv))
     corpus.add_tree(home)
     assert corpus.hits(SECRET) == []

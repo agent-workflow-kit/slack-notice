@@ -1485,7 +1485,8 @@ def test_a_peer_that_goes_away_after_the_client_hello_is_a_reset_not_a_broken_pi
 
     real = real_handshake_error(peer)
     assert isinstance(real, ConnectionResetError) and not isinstance(real, BrokenPipeError)
-    assert type(tls_broken_pipe()) is not type(real)
+    # reset-after-unread-ClientHello was checked on Linux only; other OSes may report it differently
+    assert tls_broken_pipe().errno != real.errno
 
 
 def test_handshake_timeout_matches_a_silent_peer() -> None:

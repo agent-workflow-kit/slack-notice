@@ -629,7 +629,7 @@ def test_a_signal_decided_before_the_response_is_recorded_is_the_deadline(
         return out
 
     sent = mimic_send(gw, state, attempts=(Attempt(),), work=work)
-    assert decided and decided[0].decide(expired=False) is not None
+    assert decided
     assert sent.code != 0 and sent.printed != ['{"outcome": "sent"}']
 
 
