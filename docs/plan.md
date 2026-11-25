@@ -31,7 +31,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). The issues f
 **Goal**: A package that installs, prints `--version`, and has the gateway and the fake gateway in place.
 **Success Criteria**: `make verify` green; schemas load; the fake gateway serves each response row.
 **Tests**: version output golden; fake gateway contract tests; schema positive and negative samples.
-**Status**: Not Started
+**Status**: In Progress
 
 ## Stage 1: Config, state directory and log
 
