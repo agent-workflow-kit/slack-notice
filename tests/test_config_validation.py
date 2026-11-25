@@ -1,0 +1,557 @@
+"""Config value validation (issue #11): types, ranges, names, prefixes, unknown keys, messages."""
+
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from slack_notice import cli, config
+from slack_notice.cli import CliError, Context, Streams, main
+from slack_notice.config import ConfigInvalid, validate_config
+from tests.fake_gateway import FakeGateway
+from tests.harness import schema_errors
+
+# Recognizable fake leak marker, assembled from parts so it is not a credential-shaped literal.
+CANARY = "/".join(["https:", "", "hooks.slack.com", "triggers", "T0FAKE", "0000", "FAKE" + "TOKEN"])
+SAMPLES = Path(__file__).parent / "samples" / "config.json"
+
+
+def refused(values: dict[str, Any]) -> ConfigInvalid:
+    with pytest.raises(ConfigInvalid) as raised:
+        validate_config(values)
+    return raised.value
+
+
+def key_of(values: dict[str, Any]) -> str:
+    return refused(values).key
+
+
+# --- defaults and accepted values --------------------------------------------------------------
+
+
+def test_the_empty_config_gives_the_defaults_with_a_numeric_timeout() -> None:
+    got = validate_config({})
+    assert got["enabled"] is True
+    assert got["webhook_env"] == "SLACK_WEBHOOK"
+    assert got["body_variable"] == "body"
+    assert got["level_prefix"] == config.DEFAULTS["level_prefix"]
+    assert got["max_chars"] == 3000
+    assert got["timeout"] == 10.0
+    assert isinstance(got["timeout"], float)
+    assert got["log"] is True
+
+
+def test_validation_does_not_change_its_input() -> None:
+    values: dict[str, Any] = {"timeout": "1m", "level_prefix": {"info": "I"}}
+    validate_config(values)
+    assert values == {"timeout": "1m", "level_prefix": {"info": "I"}}
+
+
+def test_a_partial_level_prefix_keeps_the_other_defaults() -> None:
+    got = validate_config({"level_prefix": {"info": "I"}})
+    assert got["level_prefix"]["info"] == "I"
+    assert got["level_prefix"]["warn"] == config.DEFAULTS["level_prefix"]["warn"]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("enabled", False),
+        ("log", False),
+        ("webhook_env", "A"),
+        ("webhook_env", "_" + "a" * 127),
+        ("body_variable", "_" + "b" * 63),
+        ("max_chars", 2000),
+        ("max_chars", 12000),
+        ("timeout", 3),
+        ("timeout", 120),
+        ("timeout", 1.5 + 1.5),
+        ("timeout", "3s"),
+        ("timeout", "2m"),
+        ("timeout", "3000ms"),
+        ("timeout", "010"),  # quoted: a string on purpose, ten seconds (issue #11 decision)
+    ],
+)
+def test_accepted_values(key: str, value: Any) -> None:
+    assert validate_config({key: value})[key] is not None
+
+
+def test_a_quoted_leading_zero_timeout_is_ten_seconds() -> None:
+    assert validate_config({"timeout": "010"})["timeout"] == 10.0
+
+
+def test_sixteen_one_code_point_emoji_are_a_valid_prefix() -> None:
+    prefix = "\U0001f535" * 16
+    assert validate_config({"level_prefix": {"info": prefix}})["level_prefix"]["info"] == prefix
+
+
+# --- unknown keys ------------------------------------------------------------------------------
+
+
+def test_an_unknown_key_is_refused_by_name() -> None:
+    assert key_of({"nope": 1}) == "nope"
+
+
+def test_an_unknown_key_of_5000_characters_is_a_question_mark() -> None:
+    assert key_of({"k" * 5000: 1}) == "?"
+
+
+@pytest.mark.parametrize("name", ["a-b", "with space", "ünï", "x\n", "a" * 65, "", "k\x00", "<<"])
+def test_an_unknown_key_that_is_not_a_key_name_is_a_question_mark(name: str) -> None:
+    assert key_of({name: 1}) == "?"
+
+
+def test_a_64_character_unknown_key_is_named() -> None:
+    assert key_of({"a" * 64: 1}) == "a" * 64
+
+
+@pytest.mark.parametrize("name", ["home", "--config"])
+def test_an_unknown_key_never_equals_a_reserved_sentinel(name: str) -> None:
+    assert key_of({name: 1}) == "?"
+
+
+def test_a_literal_merge_key_is_an_ordinary_unknown_key() -> None:
+    assert key_of({"<<": {"enabled": True}}) == "?"
+
+
+def test_an_unknown_key_is_refused_before_its_value_is_examined() -> None:
+    class Boom:
+        def __getattribute__(self, name: str) -> Any:
+            raise AssertionError("examined")
+
+        def __eq__(self, other: object) -> bool:
+            raise AssertionError("examined")
+
+        __hash__ = None  # type: ignore[assignment]
+
+    # an unknown key with a value that explodes when touched, next to an invalid known value
+    assert key_of({"zzz": Boom(), "enabled": "no"}) == "zzz"
+
+
+def test_an_unknown_key_wins_over_an_invalid_known_value() -> None:
+    assert key_of({"enabled": "no", "zzz": 1}) == "zzz"
+
+
+def test_an_unknown_level_prefix_level_is_refused_under_level_prefix() -> None:
+    assert key_of({"level_prefix": {"debug": "D"}}) == "level_prefix"
+
+
+def test_a_non_string_key_is_refused_as_a_question_mark() -> None:
+    assert key_of({1: "x"}) == "?"
+
+
+# --- null, empty and wrong types ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "key", ["enabled", "webhook_env", "body_variable", "level_prefix", "max_chars", "timeout", "log"]
+)
+@pytest.mark.parametrize("value", [None, "", [], {}, [1], 0, -1, 1.5, True, "no", b"x", {"a": 1}])
+def test_a_hostile_value_is_refused_naming_the_key_or_accepted_only_when_right(
+    key: str, value: Any
+) -> None:
+    ok = {
+        "enabled": lambda v: v is True or v is False,
+        "log": lambda v: v is True or v is False,
+        "level_prefix": lambda v: v == {},
+        "webhook_env": lambda v: False,
+        "body_variable": lambda v: False,
+        "max_chars": lambda v: False,
+        "timeout": lambda v: False,
+    }[key](value)
+    if ok:
+        validate_config({key: value})
+    else:
+        assert key_of({key: value}) == key
+
+
+@pytest.mark.parametrize("value", ["no", "yes", "off", "on", "True", "false", 1, 0, None, "", [True]])
+@pytest.mark.parametrize("key", ["enabled", "log"])
+def test_booleans_are_only_true_and_false(key: str, value: Any) -> None:
+    assert key_of({key: value}) == key
+
+
+@pytest.mark.parametrize(
+    "value", [True, False, 3000.0, 2500.5, "3000", None, 1999, 12001, 10**30, -(10**30), 0, [3000]]
+)
+def test_max_chars_is_a_strict_integer_in_range(value: Any) -> None:
+    assert key_of({"max_chars": value}) == "max_chars"
+
+
+@pytest.mark.parametrize("value", [1999, 12001, 0, -5, 10**40])
+def test_max_chars_out_of_range_says_the_range(value: int) -> None:
+    assert "2000 to 12000" in refused({"max_chars": value}).rule
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        True, False, None, 0, -1, 2.999, 120.001, 10**30, float("nan"), float("inf"), "",
+        "0", "0s", "2s", "121", "2m1s", "1h", "1e3", "-5", "+5", " 5", "5 ", "5\n", "5s\n",
+        "٥", "５s", "5S", "1_0", "x" * 300, "9" * 5000, [10], {"a": 1}, "3 s", "0.0", ".5", "5.",
+    ],
+)
+def test_timeout_outside_the_grammar_or_range_is_refused(value: Any) -> None:
+    error = refused({"timeout": value})
+    assert error.key == "timeout"
+    assert "3s to 120s" in error.rule
+
+
+def test_timeout_errors_come_from_the_duration_error_without_the_value() -> None:
+    error = refused({"timeout": "7" * 40 + "s"})
+    assert "7777" not in error.rule
+    assert error.key == "timeout"
+
+
+# --- names -------------------------------------------------------------------------------------
+
+
+NAME_HOSTILE = [
+    "",
+    "1ABC",
+    "a-b",
+    "a b",
+    "a.b",
+    "SLACK_WEBHOOK\n",
+    "\nSLACK_WEBHOOK",
+    "A\x00B",
+    "\x00",
+    "A‮B",
+    "​A",
+    "ＡＢＣ",  # fullwidth letters
+    "é",
+    "٣abc",  # arabic-indic digit start
+    "a٣",  # arabic-indic digit inside
+    "a" * 129,
+    "a" * 5000,
+    "https://hooks.example.test/triggers/x",
+    CANARY,
+    "\U0001f535",
+]
+
+
+@pytest.mark.parametrize("key", ["webhook_env", "body_variable"])
+@pytest.mark.parametrize("value", NAME_HOSTILE)
+def test_a_bad_name_is_refused(key: str, value: str) -> None:
+    error = refused({key: value})
+    assert error.key == key
+    assert error.rule == "must be a variable name"
+
+
+def test_body_variable_longer_than_64_is_refused_and_webhook_env_up_to_128_is_not() -> None:
+    assert key_of({"body_variable": "b" * 65}) == "body_variable"
+    assert validate_config({"webhook_env": "w" * 128})["webhook_env"] == "w" * 128
+    assert key_of({"webhook_env": "w" * 129}) == "webhook_env"
+
+
+def test_a_url_shaped_webhook_env_says_it_must_be_a_variable_name() -> None:
+    assert refused({"webhook_env": CANARY}).rule == "must be a variable name"
+
+
+# --- level_prefix ------------------------------------------------------------------------------
+
+
+PREFIX_REFUSED = [
+    "A\nB",
+    "INFO  x",  # two spaces
+    "",
+    "x" * 17,
+    "\U0001f535" * 17,
+    " INFO",
+    "INFO ",
+    " INFO",
+    "INFO ",
+    "A\tB",
+    "A\rB",
+    "A\x00B",
+    "A\x7fB",
+    "A\x85B",
+    "A B",
+    "A B",
+    "A‮B",  # bidi override
+    "A⁦B",
+    "A​B",
+    "A­B",
+    "﻿A",
+    "A⠀",
+    "AㅤB",
+    "A\U000e0041B",
+    "AB",  # private use
+    "A￾B",
+    "A\U0010ffffB",
+    "A͸B",  # unassigned
+    "A\ud800B",  # lone surrogate
+    "A\x0bB",
+    "A\x0cB",
+    "INFO\n",
+    "A  B",
+]
+
+
+@pytest.mark.parametrize("value", PREFIX_REFUSED)
+def test_a_prefix_the_title_rule_would_change_is_refused(value: str) -> None:
+    for level in ("info", "warn", "action", "error"):
+        error = refused({"level_prefix": {level: value}})
+        assert error.key == "level_prefix"
+        assert error.rule.startswith("level_prefix.")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["A", "INFO x", "a b", "🔵 INFO", "é", "é", "A‍B", "A️", "日本語", "x" * 16,
+     "؀A", "A‌B", "[!]", "<b>", "a\\nb", " "[:0] + "ab"],
+)
+def test_a_prefix_the_title_rule_leaves_unchanged_is_accepted(value: str) -> None:
+    assert validate_config({"level_prefix": {"info": value}})["level_prefix"]["info"] == value
+
+
+@pytest.mark.parametrize("value", [None, 5, True, [], {}, 1.5, b"x", ["A"]])
+def test_a_prefix_must_be_a_string(value: Any) -> None:
+    assert key_of({"level_prefix": {"info": value}}) == "level_prefix"
+
+
+def test_a_prefix_of_5000_characters_is_refused_quickly() -> None:
+    assert key_of({"level_prefix": {"error": "x" * 5000}}) == "level_prefix"
+
+
+def test_level_prefix_must_be_a_map() -> None:
+    for value in ("INFO", ["info"], 1, True):
+        assert key_of({"level_prefix": value}) == "level_prefix"
+
+
+def test_prefix_messages_name_the_level_and_never_the_value() -> None:
+    error = refused({"level_prefix": {"warn": "A\nB" + CANARY}})
+    assert "warn" in error.rule
+    assert CANARY not in error.rule
+    assert "A" not in error.rule.replace("level_prefix.warn", "")
+
+
+# --- messages and key naming never leak ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"webhook_env": CANARY},
+        {"body_variable": CANARY},
+        {"enabled": CANARY},
+        {"log": CANARY},
+        {"max_chars": CANARY},
+        {"timeout": CANARY},
+        {"level_prefix": CANARY},
+        {"level_prefix": {"info": CANARY}},
+        {"level_prefix": {CANARY: "x"}},
+        {CANARY: 1},
+        {"timeout": [CANARY]},
+        {"max_chars": {CANARY: CANARY}},
+    ],
+)
+def test_nothing_of_the_input_reaches_the_message_key_or_chain(values: dict[str, Any]) -> None:
+    error = refused(values)
+    assert CANARY not in str(error)
+    assert CANARY not in error.rule
+    assert CANARY not in error.key
+    assert CANARY not in repr(error)
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert error.key == "?" or error.key in config.DEFAULTS
+
+
+def test_the_string_form_is_the_fixed_message() -> None:
+    assert str(refused({"enabled": "no"})) == "configuration is invalid"
+
+
+def test_a_failure_while_validating_is_config_invalid_not_an_internal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RecursionError
+
+    monkeypatch.setattr(config._Settings, "model_validate", boom)
+    error = refused({})
+    assert error.key == "?"
+    assert str(error) == "configuration is invalid"
+
+
+# --- schema agreement --------------------------------------------------------------------------
+
+
+def _samples() -> dict[str, Any]:
+    return json.loads(SAMPLES.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("label", list(_samples()["valid"]))
+def test_every_schema_valid_sample_is_accepted_by_the_code(label: str) -> None:
+    instance = _samples()["valid"][label]
+    assert schema_errors("config", instance) == []
+    validate_config(instance)
+
+
+@pytest.mark.parametrize("label", list(_samples()["invalid"]))
+def test_every_schema_invalid_sample_is_refused_by_the_code_under_the_same_key(
+    label: str,
+) -> None:
+    sample = _samples()["invalid"][label]
+    instance = sample["instance"]
+    top = sample["path"][0] if sample["path"] else None
+    expected = top if isinstance(top, str) and top in config.DEFAULTS else None
+    key = key_of(instance)
+    if expected is not None:
+        assert key == expected
+    else:  # the unknown_key sample: the schema reports the object, the code names the key
+        assert key == "?" or key in instance
+
+
+def test_the_code_is_never_wider_than_the_schema_for_a_table_of_values() -> None:
+    """Whatever the code accepts, the schema must too (the schema is the coarse gate)."""
+    candidates: list[dict[str, Any]] = []
+    for value in [True, False, 0, 3, 3.0, 12000, 2000, "3s", "120", "0.5m", "010", "1m", "no", None]:
+        for key in ("enabled", "log", "max_chars", "timeout", "webhook_env", "body_variable"):
+            candidates.append({key: value})
+    for value in NAME_HOSTILE + ["A", "a_1"]:
+        for key in ("webhook_env", "body_variable"):
+            candidates.append({key: value})
+    for value in PREFIX_REFUSED + ["A", "🔵 INFO"]:
+        candidates.append({"level_prefix": {"info": value}})
+    for instance in candidates:
+        try:
+            validate_config(instance)
+        except ConfigInvalid:
+            continue
+        assert schema_errors("config", instance) == [], instance
+
+
+def test_the_defaults_validate_against_the_schema() -> None:
+    assert schema_errors("config", {k: v for k, v in config.DEFAULTS.items()}) == []
+
+
+# --- through the CLI ---------------------------------------------------------------------------
+
+
+def run(text: str, gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch) -> tuple[int, str, str]:
+    path = Path(gateway.home_dir()) / ".config" / "slack-notice" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    loaded: list[dict[str, Any]] = []
+
+    def handler(ctx: Context) -> int:
+        loaded.append(cli.load_settings(ctx))
+        return 0
+
+    monkeypatch.setitem(cli.HANDLERS, "validate", handler)
+    out, err = io.BytesIO(), io.BytesIO()
+    code = main(
+        ["validate", "--json"], {}, gateway, Streams(out=out, err=err, stdin_is_tty=lambda: False)
+    )
+    return code, out.getvalue().decode(), err.getvalue().decode()
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ("enabled: no\n", "enabled"),
+        ("enabled: off\n", "enabled"),
+        ("enabled: yes\n", "enabled"),
+        ("timeout:\n", "timeout"),
+        ("timeout: ~\n", "timeout"),
+        ("timeout: 2\n", "timeout"),
+        ("timeout: 121\n", "timeout"),
+        ('timeout: "1h"\n', "timeout"),
+        ("max_chars: 1999\n", "max_chars"),
+        ("webhook_env:\n", "webhook_env"),
+        ('webhook_env: "A\\x00B"\n', "webhook_env"),
+        ('body_variable: "a\\u202eb"\n', "body_variable"),
+        ('level_prefix: {info: "a\\u202eb"}\n', "level_prefix"),
+        ('level_prefix: {info: "A\\nB"}\n', "level_prefix"),
+        ('level_prefix: {info: "INFO  x"}\n', "level_prefix"),
+        ("level_prefix:\n", "level_prefix"),
+        ("<<: {enabled: true}\n", "?"),
+        ("nope: 1\n", "?" if False else "nope"),
+        ("home: 1\n", "?"),
+    ],
+)
+def test_the_cli_maps_a_bad_value_to_exit_2_config_invalid_with_the_key(
+    text: str, key: str, fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out, err = run(text, fake_gateway, monkeypatch)
+    assert code == 2
+    error = json.loads(out)["error"]
+    assert error["code"] == "config_invalid"
+    assert error["message"] == "configuration is invalid"
+    assert error["details"] == {"key": key}
+    assert error["retryable"] is None
+    assert "configuration is invalid" in err
+
+
+def test_a_value_in_a_dropin_that_breaks_a_rule_is_refused(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    drop = Path(fake_gateway.home_dir()) / ".config" / "slack-notice" / "config.d"
+    drop.mkdir(parents=True)
+    (drop / "a.yaml").write_text("log: 1\n", encoding="utf-8")
+    code, out, _ = run("enabled: true\n", fake_gateway, monkeypatch)
+    assert code == 2
+    assert json.loads(out)["error"]["details"] == {"key": "log"}
+
+
+def test_the_cli_refusal_carries_no_chain_and_no_value(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out, err = run(f"webhook_env: '{CANARY}'\n", fake_gateway, monkeypatch)
+    assert code == 2
+    assert CANARY not in out + err
+    assert json.loads(out)["error"]["details"] == {"key": "webhook_env"}
+
+
+def test_load_settings_returns_validated_settings(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, Any]] = []
+    path = Path(fake_gateway.home_dir()) / ".config" / "slack-notice" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("timeout: 1m\nenabled: false\n", encoding="utf-8")
+
+    def handler(ctx: Context) -> int:
+        seen.append(cli.load_settings(ctx))
+        return 0
+
+    monkeypatch.setitem(cli.HANDLERS, "validate", handler)
+    main(
+        ["validate"],
+        {},
+        fake_gateway,
+        Streams(out=io.BytesIO(), err=io.BytesIO(), stdin_is_tty=lambda: False),
+    )
+    assert seen[0]["timeout"] == 60.0
+    assert seen[0]["enabled"] is False
+
+
+def test_load_settings_error_has_no_chain(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = Path(fake_gateway.home_dir()) / ".config" / "slack-notice" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("enabled: no\n", encoding="utf-8")
+    raised: list[CliError] = []
+
+    def handler(ctx: Context) -> int:
+        try:
+            cli.load_settings(ctx)
+        except CliError as error:
+            raised.append(error)
+            raise
+        return 0
+
+    monkeypatch.setitem(cli.HANDLERS, "validate", handler)
+    main(
+        ["validate"],
+        {},
+        fake_gateway,
+        Streams(out=io.BytesIO(), err=io.BytesIO(), stdin_is_tty=lambda: False),
+    )
+    assert raised[0].__cause__ is None
+    assert raised[0].__context__ is None
