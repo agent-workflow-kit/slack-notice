@@ -444,3 +444,33 @@ def test_the_record_for_a_dedupe_key_and_a_refusal_never_carry_text(
     assert sent.code == 20 and sent.records[0]["dedupe_key_sha256"] is None
     assert CANARY.encode() not in sent.state_files["log.jsonl"]
     assert replace  # keep the import used
+
+
+def test_a_state_warning_raised_in_the_worker_is_written_by_the_main_thread_after_the_result(
+    fake_gateway: FakeGateway,
+) -> None:
+    """A stderr nobody reads must not block the worker under the gate's lock."""
+    import threading
+
+    threads: list[tuple[str, bytes]] = []
+
+    class Sink:
+        def write(self, data: bytes) -> int:
+            threads.append((threading.current_thread().name, data))
+            return len(data)
+
+        def flush(self) -> None:
+            pass
+
+    def always(_fd: int, _seconds: float) -> None:
+        raise RuntimeError("x")
+
+    fake_gateway.set_mtime = always  # type: ignore[method-assign]
+    fake_gateway.script(OK)
+    go(["send", "--stdin-json"], fake_gateway, stdin=HELLO, err=Sink())
+    warned = [name for name, data in threads if STATE_WARNING.encode() in data]
+    assert warned == ["MainThread"]
+    order = [data for _, data in threads]
+    sent_at = next(i for i, d in enumerate(order) if d.startswith(b"sent ("))
+    warning_at = next(i for i, d in enumerate(order) if STATE_WARNING.encode() in d)
+    assert sent_at < warning_at  # the result first, the deferred warning with the log step

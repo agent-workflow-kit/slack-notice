@@ -318,6 +318,7 @@ class Context:
     # reports unknown_outcome true and is logged.
     gate_writing: bool = field(default=False)
     _state: StateDir | None = field(default=None, repr=False)
+    _deferred_warnings: list[str] = field(default_factory=list, repr=False)
 
     def state_dir(self) -> StateDir:
         """The run's state directory handle (lazy: nothing is opened until a file is needed).
@@ -327,8 +328,27 @@ class Context:
         """
         assert self.home is not None, "state directory requested without a home"
         if self._state is None:
-            self._state = StateDir(self.gateway, self.home, self.output.warning)
+            self._state = StateDir(self.gateway, self.home, self._state_warning)
         return self._state
+
+    def _state_warning(self, line: str) -> None:
+        """The one state warning. The worker thread runs the send lock's stamp under the gate's
+        lock, and a stderr nobody reads must never hold that lock past the deadline: from any
+        thread but the main one the line is kept and written by ``flush_warnings`` (the log
+        step, after the result)."""
+        if threading.current_thread() is threading.main_thread():
+            self.output.warning(line)
+        else:
+            self._deferred_warnings.append(line)
+
+    def flush_warnings(self) -> None:
+        """Write the warnings a worker thread deferred (main thread, after the result)."""
+        lines, self._deferred_warnings = self._deferred_warnings, []
+        for line in lines:
+            try:
+                self.output.warning(line)
+            except (OSError, ValueError):
+                pass
 
     def close_state(self) -> None:
         """Release the state directory descriptor (safe to call again, or when never opened)."""
@@ -1051,6 +1071,7 @@ def _conclude(
 
     def record() -> None:
         try:
+            ctx.flush_warnings()
             log_start = ctx.gateway.monotonic()
             log_result(
                 ctx.state_dir(),
