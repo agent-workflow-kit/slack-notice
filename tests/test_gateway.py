@@ -586,7 +586,7 @@ def test_home_dir_lookup_failure_is_a_fixed_error(
         gateway.home_dir()
     assert "secret" not in str(info.value)
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None
     assert gateway.login_name() is None
 
 
@@ -602,7 +602,7 @@ def test_home_dir_any_lookup_exception_is_the_fixed_error(
         gateway.home_dir()
     assert "secret" not in str(info.value)
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None
 
 
 def test_is_directory(gateway: Gateway, tmp_path: Path) -> None:
@@ -1172,7 +1172,7 @@ def test_post_with_an_invalid_target_fails_with_a_fixed_message(
         connection.post("/triggers/T1/SECRET TOKEN", b"{}")
     assert "SECRET" not in str(info.value)
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None  # raised outside the handler: nothing is chained
 
 
 def test_post_with_a_non_ascii_target_fails_with_a_fixed_message(
@@ -1186,7 +1186,7 @@ def test_post_with_a_non_ascii_target_fails_with_a_fixed_message(
         assert "SECRET" not in text
         assert "/triggers" not in text
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None  # raised outside the handler: nothing is chained
 
 
 def served_response(

@@ -72,7 +72,9 @@ def write_config(tmp_path: Path, text: str = "{}\n") -> str:
     return str(path)
 
 
-def read_state(gateway: FakeGateway) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+def read_state(
+    gateway: FakeGateway, *, validate: bool = True
+) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
     directory = state_path(gateway)
     files: dict[str, bytes] = {}
     if directory.is_dir():
@@ -80,7 +82,8 @@ def read_state(gateway: FakeGateway) -> tuple[list[dict[str, Any]], dict[str, by
             files[entry.name] = entry.read_bytes()
     records = []
     for line in files.get("log.jsonl", b"").splitlines():
-        records.append(assert_valid("log", line))
+        if validate:
+            records.append(assert_valid("log", line))
     return records, files
 
 
@@ -95,6 +98,7 @@ def go(
     out: Any = None,
     err: Any = None,
     before: Callable[[], None] | None = None,
+    validate_log: bool = True,
 ) -> Sent:
     if stdin is not None:
         gateway.source_script.append(stdin if isinstance(stdin, SourceRead) else SourceRead(stdin))
@@ -112,7 +116,7 @@ def go(
     except FakeProcessExit as end:
         code, exited = end.code, True
     assert gateway.exit_codes[before_exits:] == ([code] if exited else [])
-    records, files = read_state(gateway)
+    records, files = read_state(gateway, validate=validate_log)
     return Sent(
         code,
         kept_out.getvalue(),

@@ -29,6 +29,7 @@ Hard rules, enforced by tests:
 
 from __future__ import annotations
 
+import _ssl  # pyright: ignore[reportMissingModuleSource]
 import errno
 import fcntl
 import http.client
@@ -387,11 +388,16 @@ class _StrictResponse(http.client.HTTPResponse):
         if not line:
             raise ValueError("end of file")  # truncated: the caller maps it to IncompleteRead
         line = line.split(b";", 1)[0]
+        size = 0
+        malformed = False
         try:
-            return int(line, 16)
+            size = int(line, 16)
         except ValueError:
+            malformed = True  # its message quotes the line: raised below, outside the handler
+        if malformed:
             self.close()
-            raise MalformedChunkSize("invalid chunk size") from None
+            raise MalformedChunkSize("invalid chunk size")
+        return size
 
 
 class _HttpsResponse:
@@ -436,12 +442,17 @@ class _HttpsConnection:
             "Connection": "close",
             "User-Agent": self._user_agent,
         }
+        refused = False
         try:
             self._conn.request("POST", path, body=body, headers=headers)
         except (http.client.InvalidURL, UnicodeEncodeError):
             # The original message (or the encode error's ``object``) quotes the request
             # target, which holds the webhook secret.
-            raise http.client.InvalidURL("invalid request") from None
+            refused = True
+        if refused:
+            # Raised outside the handler: ``from None`` would only hide the original from a
+            # traceback, it would stay on ``__context__`` for any code that walks the chain.
+            raise http.client.InvalidURL("invalid request")
 
     def getresponse(self) -> Response:
         return _HttpsResponse(self._conn.getresponse())
@@ -496,11 +507,18 @@ class SystemGateway:
         return [str(info[4][0]) for info in infos]
 
     def home_dir(self) -> str:
+        failed = False
+        home = ""
         try:
-            return pwd.getpwuid(self.uid()).pw_dir
+            home = pwd.getpwuid(self.uid()).pw_dir
         except Exception:
             # Any failure, not only a missing entry: the cause may quote the uid or a path.
-            raise HomeLookupError from None
+            failed = True
+        if failed:
+            # Raised outside the handler: ``from None`` would still leave the cause on
+            # ``__context__``, so nothing is being handled when this is raised.
+            raise HomeLookupError
+        return home
 
     def is_directory(self, path: str) -> bool:
         try:
@@ -582,12 +600,10 @@ class SystemGateway:
                 return SourceRead(b"".join(chunks)[:max_bytes], too_large=True)
 
     def ca_candidates(self) -> CaCandidates:
-        # ``openssl_cafile`` and ``openssl_capath`` are the compiled defaults; ``cafile`` and
-        # ``capath`` on the same object would honour SSL_CERT_FILE and SSL_CERT_DIR.
-        paths = ssl.get_default_verify_paths()
-        return CaCandidates(
-            paths.openssl_cafile or None, paths.openssl_capath or None, CA_FALLBACK_FILES
-        )
+        # The compiled defaults straight from the C module: ``ssl.get_default_verify_paths``
+        # looks SSL_CERT_FILE and SSL_CERT_DIR up in ``os.environ`` and no variable is read.
+        _env_cafile, cafile, _env_capath, capath = _ssl.get_default_verify_paths()
+        return CaCandidates(cafile or None, capath or None, CA_FALLBACK_FILES)
 
     def tls_context(self) -> ssl.SSLContext:
         return build_tls_context(self.ca_candidates())

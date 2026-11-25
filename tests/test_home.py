@@ -127,11 +127,11 @@ def test_the_error_message_is_fixed_and_has_no_cause_or_path(tmp_path: Path) -> 
     assert info.value.__context__ is None
 
 
-def test_a_failed_lookup_hides_its_context() -> None:
+def test_a_failed_lookup_keeps_no_context() -> None:
     with pytest.raises(HomeUnusable) as info:
         resolve_home(gateway_with("/", home_error=True))
     assert info.value.__cause__ is None
-    assert info.value.__suppress_context__
+    assert info.value.__context__ is None
 
 
 def test_the_environment_is_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
