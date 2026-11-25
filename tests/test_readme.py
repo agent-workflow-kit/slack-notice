@@ -69,8 +69,11 @@ def blocks() -> list[Block]:
             previous = (
                 lines[start - 2].strip() if start > 1 and not lines[start - 1].strip() else ""
             )
-            match = re.fullmatch(r"<!-- ([a-z-]+) -->", previous)
-            marker = match.group(1) if match else ""
+            marker = ""
+            if previous.startswith("<!-- ") and previous.endswith(" -->"):
+                name = previous[len("<!-- ") : -len(" -->")]
+                if re.fullmatch(r"[a-z-]+", name):
+                    marker = name
             found.append(Block(marker, lang, "\n".join(body) + "\n", start + 1))
         i += 1
     return found
@@ -351,7 +354,7 @@ def test_sent_means_accepted_not_delivered() -> None:
 def test_unsupported_proxy_and_ca_are_stated() -> None:
     assert "Proxy settings are not supported in 0.x" in FLAT
     assert "`SSL_CERT_FILE`" in FLAT
-    assert "hooks.slack.com" in FLAT
+    assert re.search(r"hooks\.slack\.com", FLAT)
 
 
 def test_nothing_private_and_no_url_like_trigger() -> None:
