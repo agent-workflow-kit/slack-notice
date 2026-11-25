@@ -292,8 +292,3 @@ def test_assert_valid_accepts_a_definition() -> None:
     assert assert_valid("defs", '"warn"', "level") == "warn"
     with pytest.raises(AssertionError):
         assert_valid("defs", '"warn\\n"', "level")
-
-
-# TODO(#12): validate config.example.yaml against schemas/config.json in the test suite (needs the
-# YAML loader of #10); the shared awkit-ci python-ci.yml workflow (called from ci.yml) already
-# runs check-jsonschema on it in its `schemas` job.
