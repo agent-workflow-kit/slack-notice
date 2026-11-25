@@ -63,14 +63,14 @@ def test_an_empty_message_is_refused_with_no_pointer(
 def test_flags_that_are_empty_by_the_definition_are_refused_alike(
     fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    code, out, _ = run(["send", "--message", "ㅤ‍"], fake_gateway, monkeypatch, None)
+    code, out, _ = run(["send", "--message", "\u3164\u200d"], fake_gateway, monkeypatch, None)
     assert code == 20 and json.loads(out)["error"]["reason"] == "empty_message"
 
 
 def test_a_visible_message_passes_and_is_sanitized(
     fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    body = json.dumps({"title": "a\nb", "message": "x\r\n \r\n \r\ny‮"}).encode()
+    body = json.dumps({"title": "a\nb", "message": "x\r\n \r\n \r\ny\u202e"}).encode()
     code, _, seen = run(["send"], fake_gateway, monkeypatch, body)
     assert code == 0
     assert (seen.title, seen.message, seen.level) == ("a b", "x\n\ny", "info")
@@ -100,3 +100,42 @@ def test_the_message_never_appears_in_the_refusal(
     body = json.dumps({"message": CANARY + "\ud800"}, ensure_ascii=True).encode()
     code, out, _ = run(["send"], fake_gateway, monkeypatch, body)
     assert code == 20 and CANARY not in out
+
+
+def run_capturing(
+    argv: list[str], gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> tuple[int, str, str]:
+    def handler(ctx: Context) -> int:
+        cli.sanitize_loaded(cli.load_notification(ctx, 10.0))
+        return 0
+
+    monkeypatch.setitem(cli.HANDLERS, "send", handler)
+    out, err = io.BytesIO(), io.BytesIO()
+    code = main([*argv, "--json"], {}, gateway, Streams(out, err, lambda: False))
+    return code, out.getvalue().decode(), err.getvalue().decode()
+
+
+@pytest.mark.parametrize("flag", ["message", "title", "link"])
+def test_a_lone_surrogate_in_a_flag_is_exit_20_with_the_flag_pointer(
+    flag: str, fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    argv = ["send", "--message", "m"] if flag != "message" else ["send"]
+    code, out, err = run_capturing([*argv, f"--{flag}", "a\udc80b"], fake_gateway, monkeypatch)
+    assert code == 20
+    assert_valid("cli/error", out)
+    error = json.loads(out)["error"]
+    assert error["reason"] == "invalid_payload" and error["details"]["pointer"] == f"/{flag}"
+    assert "\udc80" not in out + err and "a" + "\udc80" + "b" not in out + err
+
+
+def test_a_bad_level_carrying_a_surrogate_is_reported_at_level_without_echo(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    code, out, err = run_capturing(
+        ["send", "--message", "m", "--level", CANARY + "\udc80"], fake_gateway, monkeypatch
+    )
+    assert code == 20
+    assert_valid("cli/error", out)
+    error = json.loads(out)["error"]
+    assert error["reason"] == "invalid_payload" and error["details"]["pointer"] == "/level"
+    assert "\udc80" not in out + err and CANARY not in out + err
