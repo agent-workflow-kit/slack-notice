@@ -479,6 +479,8 @@ def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
     source: int | str = 0 if file_arg is None or file_arg == "-" else file_arg
     error: CliError | None = None
     try:
+        # A None sys.stdin means stdin was closed at start; interface.md treats that as empty
+        # input (fd 0 may have been reused by an import-time open).
         if source == 0 and sys.stdin is None:
             # stdin was closed at start (`<&-`): descriptor 0 may now be something else, so it
             # is not read; a closed stdin is empty input.

@@ -619,3 +619,27 @@ def test_read_input_is_not_called_by_parsing_alone(
     out, err = io.BytesIO(), io.BytesIO()
     assert main(["send", "--stdin-json"], {}, fake_gateway, Streams(out, err, lambda: False)) == 0
     assert fake_gateway.source_reads == 0
+
+
+@pytest.mark.parametrize(
+    "script", [SourceRead(b"0123456789", timed_out=True), OSError(5, "I/O error")]
+)
+def test_timeout_and_unusable_errors_carry_no_exception_chain(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch, script: SourceRead | OSError
+) -> None:
+    raised: list[cli.CliError] = []
+
+    def handler(ctx: Context) -> int:
+        try:
+            cli.read_input(ctx, 10.0)
+        except cli.CliError as error:
+            raised.append(error)
+        return 0
+
+    monkeypatch.setitem(cli.HANDLERS, "send", handler)
+    fake_gateway.source_script.append(script)
+    streams = Streams(out=io.BytesIO(), err=io.BytesIO(), stdin_is_tty=lambda: False)
+    main(["send", "--json", "--stdin-json"], {}, fake_gateway, streams)
+    assert len(raised) == 1
+    assert raised[0].__cause__ is None
+    assert raised[0].__context__ is None
