@@ -1,0 +1,1 @@
+{"error":{"code":"refused","message":"level must be one of info, warn, action, error","reason":"invalid_payload","details":{"pointer":"/level"},"retryable":null,"retry_after_s":null,"unknown_outcome":null}}

@@ -157,8 +157,10 @@ def check(
     )
     assert hasher(title, message) == c.sha, (
         f"{c.name}: message_sha256 changed from the golden {c.sha}: the algorithm, the "
-        "16-character truncation, the encoding, the title/LF/message layout or the sanitized-text rule moved. "
-        "If that is intended, recompute the constant independently with hashlib from interface.md "
+        "16-character truncation, the encoding, the title/LF/message "
+        "layout or the sanitized-text rule moved. "
+        "If that is intended, recompute the constant independently with hashlib "
+        "from interface.md "
         "(Log) and review the change by hand."
     )
 

@@ -1,0 +1,1 @@
+{"ts":"2023-11-14T22:13:20.875Z","tool":"slack-notice","version":"1.2.3","outcome":"sent","exit":0,"code":null,"reason":null,"level":"info","bytes":75,"truncated":false,"duration_ms":875,"http_status":200,"message_sha256":"33ed844801b9a0a4","dedupe_key_sha256":null,"actor":"human:alice","actor_source":"flag"}

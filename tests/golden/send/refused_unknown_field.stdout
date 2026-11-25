@@ -1,0 +1,1 @@
+{"error":{"code":"refused","message":"the notification has a field that is not title, message, level or link","reason":"invalid_payload","details":{"pointer":"/extra"},"retryable":null,"retry_after_s":null,"unknown_outcome":null}}
