@@ -645,11 +645,11 @@ def test_handler_return_value_is_the_exit_code(
     assert run(["send"], fake_gateway).code == 22
 
 
-def test_validate_is_an_internal_error_until_its_issue_lands(
+def test_validate_test_message_is_an_internal_error_until_its_issue_lands(
     fake_gateway: FakeGateway,
 ) -> None:
-    # TODO(#31) / TODO(#32): remove when validate is implemented.
-    result = run(["validate"], fake_gateway)
+    # TODO(#32): remove when validate --test-message is implemented.
+    result = run(["validate", "--test-message"], fake_gateway)
     assert result.code == 1
     assert result.stderr == "internal: internal error (NotImplementedError)\n"
 

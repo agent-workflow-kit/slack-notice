@@ -744,7 +744,7 @@ def load_settings(ctx: Context) -> dict[str, Any]:
     same error with the config key name (or `?`) in details.key and a message that names the key
     and the rule (never the value).
     """
-    # `validate` (#31, #32) reuses this.
+    # `validate` (#32) reuses this.
     key: str | None = None
     message = ""
     settings: dict[str, Any] = {}
@@ -859,10 +859,6 @@ def sanitize_loaded(notification: dict[str, Any]) -> Sanitized:
         raise CliError(20, "refused", emptied.message, reason="empty_message")
     assert result is not None
     return result
-
-
-def _not_implemented(_ctx: Context) -> int:
-    raise NotImplementedError
 
 
 def _elapsed_ms(ctx: Context, since: float) -> int:
@@ -1177,10 +1173,65 @@ def _conclude(
     )
 
 
-# TODO(#31), TODO(#32): validate.
+# --- validate ------------------------------------------------------------------------------------
+
+CONFIG_OK_MESSAGE = "configuration is valid"
+CREDENTIAL_OK_MESSAGE = "the webhook credential is set and has the form of a workflow trigger URL"
+# The exit code of a failed check (interface: validate): config is 2 but never reaches here (an
+# unloadable config is the error envelope), so only these two checks can fail.
+CHECK_EXIT_CODES = {"credential": 12, "test_message": 12}
+
+
+def _check(name: str, ok: bool, message: str) -> dict[str, Any]:
+    return {"name": name, "ok": ok, "message": message}
+
+
+def _credential_check(ctx: Context, settings: dict[str, Any]) -> dict[str, Any]:
+    """Validate the one configured variable against the URL grammar. No network, no state."""
+    target: webhook.Webhook | None = None
+    try:
+        target = webhook.read_webhook(ctx.env, settings["webhook_env"])
+    except webhook.CredentialInvalid:
+        pass
+    if target is None:
+        return _check("credential", False, webhook.INVALID_MESSAGE)
+    return _check("credential", True, CREDENTIAL_OK_MESSAGE)
+
+
+def validate(ctx: Context) -> int:
+    """The `validate` command (interface: validate): config, then credential.
+
+    Plain validate has no deadline, reads no stdin, uses no state directory, writes no log record
+    and opens no connection; ``enabled`` is only reported. A signal before the result print is
+    128+N (the gate is never armed), as in a dry run; ``--dry-run`` has no effect.
+    """
+    if ctx.args.test_message:
+        # TODO(#32): `validate --test-message` (disabled -> exit 22; the test_message check, its
+        # deadline and its log record). Until then it fails as an internal error (exit 1) before
+        # anything is read or sent.
+        raise NotImplementedError
+    settings = load_settings(ctx)  # exit 2 config_invalid ends the run; the credential is unread
+    checks = [_check("config", True, CONFIG_OK_MESSAGE)]
+    checks.append(_credential_check(ctx, settings))  # TODO(#32): test_message follows here
+    failed = next((c for c in checks if not c["ok"]), None)
+    code = 0 if failed is None else CHECK_EXIT_CODES[failed["name"]]
+    ctx.output.result_printed()  # before the print: validate has no step 6
+    if ctx.json:
+        ctx.output.json_document(
+            {"ok": failed is None, "enabled": settings["enabled"], "checks": checks}
+        )
+        return code
+    for entry in checks:
+        if entry["ok"]:
+            ctx.output.info(f"{entry['name']}: ok ({entry['message']})")
+        else:  # a failure is an error line: --quiet keeps it
+            ctx.output.error_line(f"{entry['name']}: failed ({entry['message']})")
+    return code
+
+
 HANDLERS: dict[str, Callable[[Context], int]] = {
     "send": send,
-    "validate": _not_implemented,
+    "validate": validate,
 }
 
 
