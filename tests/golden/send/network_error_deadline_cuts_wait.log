@@ -1,0 +1,1 @@
+{"ts":"2023-11-14T22:13:21.250Z","tool":"slack-notice","version":"1.2.3","outcome":"failed","exit":12,"code":"network_error","reason":null,"level":"warn","bytes":58,"truncated":false,"duration_ms":1250,"http_status":null,"message_sha256":"c6f7d65297ee1d17","dedupe_key_sha256":null,"actor":"auto:unknown","actor_source":"default"}

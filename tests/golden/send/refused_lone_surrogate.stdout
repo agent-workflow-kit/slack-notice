@@ -1,0 +1,1 @@
+{"error":{"code":"refused","message":"the field is not valid Unicode text (it holds a lone surrogate)","reason":"invalid_payload","details":{"pointer":"/message"},"retryable":null,"retry_after_s":null,"unknown_outcome":null}}
