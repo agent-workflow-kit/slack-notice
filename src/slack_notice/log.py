@@ -10,7 +10,7 @@ text can reach the file; ``append_record`` writes it under the ``log.lock`` floc
 it never raises for a filesystem problem and never changes the exit code.
 
 TODO(#28): the send command calls ``log_result`` after step 7's output and closes the StateDir.
-TODO(#21): the send lock (spacing) uses ``StateDir.open_file("send.lock")``.
+The send lock (``spacing.acquire``) opens ``send.lock`` through the same ``StateDir`` handle.
 """
 
 from __future__ import annotations

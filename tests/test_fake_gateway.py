@@ -1679,3 +1679,24 @@ def test_write_hooks_raise_cap_and_record(tmp_path: Path) -> None:
         gw.close_fd(dir_fd)
     assert {"write_fd", "truncate_fd", "read_at", "file_size"} <= set(gw.events)
     assert "rename:log.jsonl>log.jsonl.1" in gw.events
+
+
+def test_mtime_hooks_raise_and_record(tmp_path: Path) -> None:
+    home = tmp_path / "h"
+    home.mkdir(mode=0o700)
+    gw = FakeGateway(home=str(home))
+    dir_fd = gw.open_state_dir(str(home))
+    fd = gw.open_state_file(dir_fd, "send.lock")
+    try:
+        gw.set_mtime(fd, 1_700_000_000.0)
+        assert gw.file_mtime(fd) == pytest.approx(1_700_000_000.0, abs=1e-6)
+        gw.mtime_error = OSError(5, "io")
+        with pytest.raises(OSError):
+            gw.file_mtime(fd)
+        gw.set_mtime_error = OSError(30, "read-only")
+        with pytest.raises(OSError):
+            gw.set_mtime(fd, 1.0)
+    finally:
+        gw.close_fd(fd)
+        gw.close_fd(dir_fd)
+    assert {"file_mtime", "set_mtime"} <= set(gw.events)
