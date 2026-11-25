@@ -750,7 +750,8 @@ _RULES = {
     "dict_type": "must be a mapping",
     "name": "must be a variable name",
     "prefix": (
-        f"must be one line of 1 to {_PREFIX_LENGTH} characters that the title rule leaves unchanged"
+        f"must be one line of 1 to {_PREFIX_LENGTH} characters that the title rule leaves "
+        "unchanged and that is not empty"
     ),
     "duration": f"must be a duration from {DURATION_RANGES['timeout'][0]}s "
     f"to {DURATION_RANGES['timeout'][1]}s",
@@ -821,7 +822,8 @@ def validate_config(values: dict[Any, Any], *, fallback_key: str = "?") -> dict[
 
 
 def _fallback(key: str) -> ConfigInvalid:
-    return ConfigInvalid(key, "is invalid", f"{key} is invalid")
+    # Empty message: the caller prints the fixed text, so the key (a file path) stays in details.
+    return ConfigInvalid(key, "is invalid", "")
 
 
 def _failure_of(error: ValidationError) -> ConfigInvalid:

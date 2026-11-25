@@ -428,6 +428,7 @@ def test_a_failure_while_validating_is_config_invalid_not_an_internal_error(
     error = refused({})
     assert error.key == "?"
     assert str(error) == "configuration is invalid"
+    assert error.message == ""
 
 
 # --- schema agreement --------------------------------------------------------------------------
@@ -639,6 +640,7 @@ def test_a_failure_of_the_error_conversion_is_the_fallback_key_with_no_chain(
     with pytest.raises(ConfigInvalid) as raised:
         validate_config({"enabled": CANARY}, fallback_key="/x")
     assert raised.value.key == "/x"
+    assert raised.value.message == ""
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
     assert CANARY not in repr(raised.value.message)
@@ -652,6 +654,7 @@ def test_a_machinery_failure_uses_the_fallback_key(monkeypatch: pytest.MonkeyPat
     with pytest.raises(ConfigInvalid) as raised:
         validate_config({}, fallback_key="/x")
     assert raised.value.key == "/x"
+    assert raised.value.message == ""
     assert raised.value.__context__ is None
 
 
@@ -824,7 +827,7 @@ def test_a_machinery_failure_names_the_default_config_file(
     expected = str(Path(fake_gateway.home_dir()) / ".config" / "slack-notice" / "config.yaml")
     error = _settings_key(["validate", "--json"], fake_gateway, monkeypatch)
     assert error["details"] == {"key": expected}
-    assert error["message"] == f"{expected} is invalid"
+    assert error["message"] == "configuration is invalid"
 
 
 def test_a_machinery_failure_names_an_absolute_config_flag(
@@ -890,3 +893,7 @@ def test_a_file_level_failure_keeps_the_fixed_message(
     code, out, _ = run("a: [\n", fake_gateway, monkeypatch)
     assert code == 2
     assert json.loads(out)["error"]["message"] == "configuration is invalid"
+
+
+def test_the_prefix_rule_text_says_it_must_not_be_empty() -> None:
+    assert config._RULES["prefix"].endswith("leaves unchanged and that is not empty")
