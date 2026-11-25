@@ -75,7 +75,10 @@ def isolated_environment(
 
 @pytest.fixture
 def fake_gateway(tmp_path: Path) -> Iterator[FakeGateway]:
-    """A fake gateway with a private home (mode 0700) and no stalls left behind."""
+    """A fake gateway with a private home (mode 0700) and no stalls left behind.
+
+    Teardown fails the test on a recorded contract violation or an unconsumed scripted attempt
+    (set ``allow_unconsumed_script`` to leave attempts on purpose)."""
     from tests.fake_gateway import FakeGateway  # lazy: scaffold tests copy this conftest alone
 
     home = tmp_path / "gwhome"
@@ -83,3 +86,5 @@ def fake_gateway(tmp_path: Path) -> Iterator[FakeGateway]:
     gateway = FakeGateway(home=str(home))
     yield gateway
     gateway.release_stalls()  # a daemon worker blocked in a stall must not outlive the test
+    # A contract violation inside a worker thread would only surface as an exit 1 "internal".
+    gateway.assert_clean()
