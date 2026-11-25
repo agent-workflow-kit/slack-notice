@@ -88,7 +88,7 @@ def _silent_excepthook(args: threading.ExceptHookArgs) -> None:
 class Deadline:
     """One send's deadline, gate, result slot and worker. ``at`` is an absolute
     ``gateway.monotonic()`` value. ``on_writing`` runs under the lock at the move to writing (it
-    must be trivial: ``Output.writing_began``)."""
+    must be trivial and may raise: the gate then stays idle and the exception propagates)."""
 
     def __init__(
         self, gateway: Gateway, *, at: float, on_writing: Callable[[], None] | None = None
@@ -133,16 +133,28 @@ class Deadline:
     # -- the worker's side -----------------------------------------------------------------
 
     def enter_writing(self) -> bool:
-        """``idle -> writing``; ``False`` (nothing may be written) once the deadline was decided.
-        Already writing is a bug (``ValueError``): a retry first records its 429."""
+        """``idle -> writing``; ``False`` (nothing may be written) once the deadline was decided,
+        and also when the deadline has passed or a signal was noted but the main thread has not
+        decided yet: the refusal makes that same decision (``decide(expired=True)``), so no
+        request is written after the deadline. Already writing is a bug (``ValueError``): a retry
+        first records its 429. If ``on_writing`` raises, the gate goes back to idle and the
+        exception propagates."""
         with self._lock:
             if self._decided is not None or self._state is GateState.ABANDONED:
                 return False
             if self._state is GateState.WRITING:
                 raise ValueError("the gate is already writing")
+            if self._signalled or not self.remaining() > 0:
+                self._decide_locked(expired=True)
+                self._wake.set()
+                return False
             self._state = GateState.WRITING
             if self._on_writing is not None:
-                self._on_writing()
+                try:
+                    self._on_writing()
+                except BaseException:
+                    self._state = GateState.IDLE
+                    raise
             return True
 
     def record(self, outcome: Outcome, *, final: bool) -> bool:
@@ -173,33 +185,42 @@ class Deadline:
 
     # -- the main thread's side ------------------------------------------------------------
 
-    def decide(self, *, expired: bool) -> Verdict | None:
+    def decide(self, *, expired: bool, worker_lost: bool = False) -> Verdict | None:
         """The one decision point. ``None``: nothing yet (no result, not expired). Looks at the
-        slot first; decided once, then the same verdict is returned."""
+        slot first; decided once, then the same verdict is returned. ``worker_lost``: the worker
+        thread is dead and left nothing in the slot (it could not even report its failure): exit 1
+        with ``RuntimeError`` at once."""
         with self._lock:
-            if self._decided is not None:
-                return self._decided
-            verdict: Verdict | None = None
-            if self._final is not None:
-                verdict = Verdict(self._final, None, self._state is GateState.WRITING, False)
-            elif self._error is not None:
-                name, writing = self._error
-                verdict = Verdict(None, name, writing, False)
-            elif expired:
-                if self._state is GateState.WRITING:
-                    verdict = Verdict(outcome_unknown(), None, True, True)
-                else:
-                    self._state = GateState.ABANDONED
-                    last = self._last or network_error(tls=False, timeout=True)
-                    verdict = Verdict(last, None, False, True)
-            if verdict is not None:
-                self._decided = verdict
-            return verdict
+            return self._decide_locked(expired=expired, worker_lost=worker_lost)
+
+    def _decide_locked(self, *, expired: bool, worker_lost: bool = False) -> Verdict | None:
+        if self._decided is not None:
+            return self._decided
+        verdict: Verdict | None = None
+        if self._final is not None:
+            verdict = Verdict(self._final, None, self._state is GateState.WRITING, False)
+        elif self._error is not None:
+            name, writing = self._error
+            verdict = Verdict(None, name, writing, False)
+        elif worker_lost:
+            verdict = Verdict(None, "RuntimeError", self._state is GateState.WRITING, False)
+        elif expired:
+            if self._state is GateState.WRITING:
+                verdict = Verdict(outcome_unknown(), None, True, True)
+            else:
+                self._state = GateState.ABANDONED
+                last = self._last or network_error(tls=False, timeout=True)
+                verdict = Verdict(last, None, False, True)
+        if verdict is not None:
+            self._decided = verdict
+        return verdict
 
     def run(self, work: Callable[[Deadline], Outcome]) -> Verdict:
         """Start the daemon worker once, wait in slices of at most 100 ms and return the verdict.
         The worker is never joined. ``threading.excepthook`` is replaced by a silent one for the
-        life of the process (the tool ends through ``exit_now``)."""
+        life of the process (the tool ends through ``exit_now``); a library or test use must
+        restore ``threading.excepthook`` itself. A worker that died with nothing in the slot is
+        decided at once as exit 1 (``RuntimeError``)."""
         if self._started:
             raise RuntimeError("the worker was already started")
         self._started = True
@@ -211,7 +232,9 @@ class Deadline:
         while True:
             self._wake.clear()
             expired = self._signalled or not self.remaining() > 0
-            verdict = self.decide(expired=expired)
+            # Read before deciding: a dead worker has stored everything it ever will.
+            lost = not self.worker.is_alive()
+            verdict = self.decide(expired=expired, worker_lost=lost)
             if verdict is not None:
                 return verdict
             self._wake.wait(max(0.0, min(SLICE_SECONDS, self.remaining())))
@@ -228,6 +251,9 @@ class Deadline:
                 # and the body.
                 self._fail(class_name(exc))
         except BaseException:
+            # Nothing may escape the worker (no traceback, no excepthook text): if even reporting
+            # the failure failed, the main thread decides at the deadline, or at once when it sees
+            # the worker dead with an empty slot.
             pass
         finally:
             self._wake.set()
@@ -256,16 +282,6 @@ def attempt_work(
 # --- the exit --------------------------------------------------------------------------------
 
 
-def end_process(gateway: Gateway, code: int, flush: list[Callable[[], None]]) -> None:
-    """Flush (each failure ignored) and end the process through the gateway; does not return."""
-    for step in flush:
-        try:
-            step()
-        except Exception:
-            pass
-    gateway.exit_now(code)
-
-
 def conclude(
     gateway: Gateway,
     code: int,
@@ -273,23 +289,37 @@ def conclude(
     emit: Callable[[], None],
     flush: Callable[[], None],
     record: Callable[[], None],
+    bound: float = 1.0,
 ) -> None:
-    """Interface step 7 and the exit: print the result, flush it, then the log step, then
-    ``exit_now``, in that order and always reaching the exit. A print that fails is exit 1; a flush
-    or log failure changes nothing (the log is advisory); the log step is bounded by its own lock
-    poll, not here. Does not return."""
-    try:
+    """Interface step 7 and the exit: print the result and flush it, then the log step, then
+    ``exit_now``, in that order and always reaching the exit. The print and the flush run in one
+    daemon thread that is waited for at most ``bound`` seconds of real time (a pipe nobody reads
+    must not hold the process past the deadline): when it does not finish, the log step and the
+    exit follow anyway. A write failure (``OSError``, ``BrokenPipeError`` included) changes
+    nothing: the exit code is the result's. Another exception from the print is exit 1; one from
+    the flush or the log step changes nothing (the log is advisory and bounded by its own lock
+    poll). Does not return."""
+    final = [code]
+
+    def print_step() -> None:
         try:
             emit()
+        except OSError:
+            pass
         except Exception:
-            code = 1
+            final[0] = 1
         try:
             flush()
         except Exception:
             pass
+
+    try:
+        printer = threading.Thread(target=print_step, name="slack-notice-print", daemon=True)
+        printer.start()
+        printer.join(bound)
         try:
             record()
         except Exception:
             pass
     finally:
-        gateway.exit_now(code)
+        gateway.exit_now(final[0])

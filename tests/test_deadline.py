@@ -29,9 +29,9 @@ from slack_notice.deadline import (
     Verdict,
     attempt_work,
     conclude,
-    end_process,
 )
 from slack_notice.gateway import SystemGateway
+from slack_notice.log import StateDir, log_result
 from slack_notice.webhook import (
     AttemptResult,
     Outcome,
@@ -43,6 +43,7 @@ from slack_notice.webhook import (
     outcome_unknown,
 )
 from tests.fake_gateway import Attempt, FakeGateway, FakeProcessExit
+from tests.test_log import sent as log_fields
 
 CANARY = "CAN" + "ARY" + "_25d"
 PATH = "/triggers/" + CANARY + "/seg"
@@ -109,6 +110,63 @@ def test_a_decided_deadline_refuses_the_move_to_writing(fake_gateway: FakeGatewa
     assert d.state is GateState.ABANDONED
     assert d.enter_writing() is False
     assert calls == [] and not d.writing
+
+
+def test_a_deadline_that_passed_refuses_the_move_to_writing_before_any_decision(
+    fake_gateway: FakeGateway,
+) -> None:
+    calls: list[int] = []
+    d = make(fake_gateway, in_seconds=-1.0, on_writing=lambda: calls.append(1))
+    last = rate_limited()
+    assert d.record(last, final=False)  # an earlier 429
+    assert d.enter_writing() is False  # decide() never ran: the gate itself refuses
+    assert calls == [] and d.state is GateState.ABANDONED
+    verdict = d.decide(expired=False)  # the decision was made by the refusal
+    assert verdict is not None and verdict.deadline_hit and verdict.outcome == last
+    assert (verdict.exit_code, verdict.unknown_outcome, verdict.gate_writing) == (12, False, False)
+    assert d.record(rate_limited(), final=True) is False  # a later report is dropped
+    assert d.decide(expired=True) == verdict
+
+
+def test_a_deadline_that_passed_with_no_earlier_result_is_network_error_timeout(
+    fake_gateway: FakeGateway,
+) -> None:
+    d = make(fake_gateway, in_seconds=-1.0)
+    assert d.enter_writing() is False
+    verdict = d.decide(expired=False)
+    assert verdict is not None and verdict.outcome is not None
+    assert verdict.outcome.code == "network_error" and verdict.outcome.details == {
+        "tls": False,
+        "timeout": True,
+    }
+    assert not verdict.unknown_outcome and d.state is GateState.ABANDONED
+
+
+def test_a_noted_signal_refuses_the_move_to_writing_before_any_decision(
+    fake_gateway: FakeGateway,
+) -> None:
+    calls: list[int] = []
+    d = make(fake_gateway, on_writing=lambda: calls.append(1))
+    last = rate_limited()
+    assert d.record(last, final=False)
+    d.note_signal()
+    assert d.enter_writing() is False
+    assert calls == [] and d.state is GateState.ABANDONED
+    verdict = d.decide(expired=False)
+    assert verdict is not None and verdict.deadline_hit and verdict.outcome == last
+    assert not verdict.unknown_outcome
+
+
+def test_a_failing_on_writing_hook_restores_the_gate_and_propagates(
+    fake_gateway: FakeGateway,
+) -> None:
+    def boom() -> None:
+        raise RuntimeError("hook")
+
+    d = make(fake_gateway, on_writing=boom)
+    with pytest.raises(RuntimeError):
+        d.enter_writing()
+    assert d.state is GateState.IDLE and not d.writing
 
 
 def test_a_full_429_moves_the_gate_back_to_idle_and_a_retry_can_write_again(
@@ -297,10 +355,12 @@ def test_a_response_complete_at_the_deadline_is_reported_as_it_is(
 
     def work(dl: Deadline) -> Outcome:
         assert dl.enter_writing()
-        advance(fake_gateway, 100.0)  # the response arrives after the deadline instant
         body = b'{"ok":true}' if status == 200 else b"{}"
         out = map_attempt(AttemptResult(Phase.READ, status, body), gate_writing=True)
-        return out.with_retry_after(4.0) if status == 429 else out
+        out = out.with_retry_after(4.0) if status == 429 else out
+        assert dl.record(out, final=True)  # complete first, then the deadline instant passes
+        advance(fake_gateway, 100.0)
+        return out
 
     verdict = d.run(work)
     assert verdict.outcome is not None and verdict.outcome.code == code
@@ -309,26 +369,25 @@ def test_a_response_complete_at_the_deadline_is_reported_as_it_is(
 
 
 def test_a_worker_that_finishes_just_before_the_check_wins(fake_gateway: FakeGateway) -> None:
-    d = make(fake_gateway, in_seconds=-5.0)  # already past when run starts
-    done = threading.Event()
+    d = make(fake_gateway)
     final = map_attempt(AttemptResult(Phase.READ, 200, b'{"ok":true}'), gate_writing=True)
 
     def work(dl: Deadline) -> Outcome:
         assert dl.enter_writing()
         return final
 
-    # The worker needs a moment: hold the main thread's first check until the result is stored.
+    # Hold the main thread's first check until the result is stored, then let the deadline pass.
     real_decide = d.decide
 
-    def decide(*, expired: bool) -> Verdict | None:
+    def decide(*, expired: bool, worker_lost: bool = False) -> Verdict | None:
         assert d.worker is not None
         d.worker.join(WAIT)
-        done.set()
-        return real_decide(expired=expired)
+        advance(fake_gateway, 100.0)
+        return real_decide(expired=True)
 
     d.decide = decide  # type: ignore[method-assign]
     verdict = d.run(work)
-    assert done.is_set() and verdict.outcome == final and not verdict.deadline_hit
+    assert verdict.outcome == final and not verdict.deadline_hit
 
 
 def test_a_worker_that_finishes_after_the_decision_changes_nothing(
@@ -450,6 +509,63 @@ def test_a_worker_exception_is_exit_1_with_the_class_name_only(
     join(d)
     captured = capsys.readouterr()
     assert captured.out == "" and captured.err == ""  # threading.excepthook prints nothing
+
+
+def test_an_exception_after_a_fully_read_429_is_not_an_unknown_outcome(
+    fake_gateway: FakeGateway,
+) -> None:
+    d = make(fake_gateway)
+
+    def work(dl: Deadline) -> Outcome:
+        assert dl.enter_writing()
+        assert dl.record(rate_limited(), final=False)  # the gate is idle again
+        raise HostileError
+
+    verdict = d.run(work)
+    assert verdict.outcome is None and verdict.error_class == "HostileError"
+    assert (verdict.exit_code, verdict.gate_writing, verdict.unknown_outcome) == (1, False, False)
+    join(d)
+
+
+@pytest.mark.parametrize("writing", [False, True])
+def test_a_worker_that_cannot_report_is_decided_at_once_not_at_the_deadline(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch, writing: bool
+) -> None:
+    def broken(_exc: BaseException) -> str:
+        raise RuntimeError("no name")
+
+    monkeypatch.setattr(deadline, "class_name", broken)
+    d = make(fake_gateway, in_seconds=60.0)
+
+    def work(dl: Deadline) -> Outcome:
+        if writing:
+            assert dl.enter_writing()
+        raise HostileError
+
+    began = time.monotonic()
+    verdict = d.run(work)
+    assert time.monotonic() - began < 5.0  # not the 60 s deadline
+    assert verdict.outcome is None and verdict.error_class == "RuntimeError"
+    assert (verdict.exit_code, verdict.gate_writing, verdict.unknown_outcome) == (
+        1,
+        writing,
+        writing,
+    )
+    assert not verdict.deadline_hit
+    join(d)
+
+
+def test_a_worker_exception_in_the_slot_wins_over_the_deadline(fake_gateway: FakeGateway) -> None:
+    d = make(fake_gateway)
+
+    def work(dl: Deadline) -> Outcome:
+        raise HostileError
+
+    d.run(work)
+    join(d)
+    advance(fake_gateway, 100.0)
+    again = d.decide(expired=True)
+    assert again is not None and again.error_class == "HostileError"
 
 
 def test_a_worker_exception_keeps_no_traceback(fake_gateway: FakeGateway) -> None:
@@ -627,6 +743,39 @@ def test_a_stall_or_trickle_after_the_first_byte_is_outcome_unknown_at_the_deadl
     assert conn.closed
 
 
+class TricklingResponse:
+    """A response whose body arrives one byte per 10 ms until released: the per-operation timeout
+    never fires, so only the deadline can end the wait (real time)."""
+
+    status = 200
+
+    def __init__(self, release: threading.Event) -> None:
+        self.release = release
+
+    def read(self, amount: int) -> bytes:
+        return b"" if self.release.wait(0.01) else b"x"
+
+
+class TricklingConnection(BlockingConnection):
+    def getresponse(self) -> object:
+        return TricklingResponse(self.release)
+
+
+def test_a_body_that_trickles_through_the_read_path_is_outcome_unknown_at_the_deadline(
+    fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch, release: threading.Event
+) -> None:
+    conn = TricklingConnection(release, trickle=False)
+    monkeypatch.setattr(fake_gateway, "https_connection", lambda *a, **k: conn)
+    began = time.monotonic()
+    d, verdict = attempt(fake_gateway, in_seconds=0.2)
+    assert time.monotonic() - began < 1.2  # within 1 s of the deadline
+    assert verdict.outcome == outcome_unknown() and verdict.deadline_hit
+    assert verdict.gate_writing and d.worker is not None and d.worker.is_alive()
+    release.set()
+    join(d)
+    assert conn.closed
+
+
 def test_a_result_that_arrives_after_the_deadline_with_the_gate_writing_is_dropped(
     fake_gateway: FakeGateway,
 ) -> None:
@@ -726,20 +875,6 @@ def test_the_fake_gateway_exit_records_and_raises_the_code(fake_gateway: FakeGat
     assert fake_gateway.exit_codes == [12]
 
 
-def test_end_process_flushes_then_exits_even_when_a_flush_fails(fake_gateway: FakeGateway) -> None:
-    order: list[str] = []
-
-    def bad() -> None:
-        order.append("bad")
-        raise OSError("closed")
-
-    with pytest.raises(FakeProcessExit):
-        end_process(
-            fake_gateway, 12, [lambda: order.append("out"), bad, lambda: order.append("err")]
-        )
-    assert order == ["out", "bad", "err"] and fake_gateway.exit_codes == [12]
-
-
 def test_conclude_prints_flushes_logs_then_exits_in_that_order(fake_gateway: FakeGateway) -> None:
     order: list[str] = []
     with pytest.raises(FakeProcessExit):
@@ -769,6 +904,36 @@ def test_a_slow_log_step_comes_after_the_flushed_result(fake_gateway: FakeGatewa
     assert printed == ["result", "flushed"] and flushed_before_log == [True]
 
 
+def test_the_real_log_step_under_a_held_lock_comes_after_the_result_and_ends_at_about_1_s(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "statehome"
+    home.mkdir(mode=0o700)
+    gw = FakeGateway(home=str(home))
+    gw.lock_held = True  # the log lock is never obtained: the poll runs its full bound
+    warnings: list[str] = []
+    order: list[str] = []
+    started: list[float] = []
+
+    def record() -> None:
+        started.append(gw.monotonic())
+        with StateDir(gw, str(home), warnings.append) as state:
+            log_result(state, gw, enabled=True, **log_fields())
+        order.append("record")
+
+    with pytest.raises(FakeProcessExit):
+        conclude(
+            gw,
+            12,
+            emit=lambda: order.append("emit"),
+            flush=lambda: order.append("flush"),
+            record=record,
+        )
+    assert order == ["emit", "flush", "record"] and gw.exit_codes == [12]
+    assert 1.0 <= gw.monotonic() - started[0] < 1.1  # the lock poll, nothing else
+    assert len(warnings) == 1  # the one state warning; the exit code is untouched
+
+
 def test_a_failing_log_step_never_changes_the_exit_code(fake_gateway: FakeGateway) -> None:
     def record() -> None:
         raise OSError("disk full " + CANARY)
@@ -778,11 +943,14 @@ def test_a_failing_log_step_never_changes_the_exit_code(fake_gateway: FakeGatewa
     assert fake_gateway.exit_codes == [12]
 
 
-def test_a_failing_print_is_exit_1_and_still_ends_the_process(fake_gateway: FakeGateway) -> None:
+@pytest.mark.parametrize("error", [BrokenPipeError, OSError, lambda: OSError(32, "closed")])
+def test_a_failed_print_keeps_the_results_exit_code_and_still_logs(
+    fake_gateway: FakeGateway, error: Callable[[], BaseException]
+) -> None:
     order: list[str] = []
 
     def emit() -> None:
-        raise BrokenPipeError
+        raise error()
 
     with pytest.raises(FakeProcessExit):
         conclude(
@@ -792,7 +960,47 @@ def test_a_failing_print_is_exit_1_and_still_ends_the_process(fake_gateway: Fake
             flush=lambda: order.append("flush"),
             record=lambda: order.append("record"),
         )
+    assert fake_gateway.exit_codes == [12] and order == ["flush", "record"]
+
+
+def test_a_print_that_raises_something_else_is_exit_1(fake_gateway: FakeGateway) -> None:
+    order: list[str] = []
+
+    def emit() -> None:
+        raise ValueError("encoder")
+
+    with pytest.raises(FakeProcessExit):
+        conclude(
+            fake_gateway,
+            0,
+            emit=emit,
+            flush=lambda: order.append("flush"),
+            record=lambda: order.append("record"),
+        )
     assert fake_gateway.exit_codes == [1] and order == ["flush", "record"]
+
+
+def test_a_stuck_print_is_bounded_and_the_log_and_exit_still_happen(
+    fake_gateway: FakeGateway, release: threading.Event
+) -> None:
+    order: list[str] = []
+
+    def emit() -> None:
+        release.wait(WAIT)  # a pipe nobody reads
+
+    began = time.monotonic()
+    with pytest.raises(FakeProcessExit):
+        conclude(
+            fake_gateway,
+            12,
+            emit=emit,
+            flush=lambda: order.append("flush"),
+            record=lambda: order.append("record"),
+            bound=0.2,
+        )
+    assert time.monotonic() - began < 2.0
+    assert order == ["record"] and fake_gateway.exit_codes == [12]
+    release.set()
 
 
 def test_an_exception_in_flush_or_exit_path_still_reaches_the_exit(
@@ -826,6 +1034,9 @@ def test_os_exit_appears_in_no_module_but_the_gateway() -> None:
 CHILD = textwrap.dedent(
     """
     import os, sys, threading
+    sys.path.insert(0, sys.argv[2])
+    import slack_notice
+    assert slack_notice.__file__.startswith(sys.argv[2]), slack_notice.__file__
     from slack_notice.deadline import Deadline, conclude
     from slack_notice.gateway import SystemGateway
 
@@ -852,15 +1063,11 @@ CHILD = textwrap.dedent(
 def test_a_worker_blocked_in_a_syscall_cannot_keep_the_process_alive(
     tmp_path: Path, state: str, code: str
 ) -> None:
-    src = str(Path(slack_notice.__file__).resolve().parent.parent)
-    env = {
-        "HOME": str(tmp_path),
-        "XDG_CONFIG_HOME": str(tmp_path),
-        "PYTHONPATH": src,
-        "PATH": "/usr/bin:/bin",
-    }
+    src = str(Path(slack_notice.__file__).resolve().parent.parent)  # this worktree's copy
+    env = {"HOME": str(tmp_path), "XDG_CONFIG_HOME": str(tmp_path), "PATH": "/usr/bin:/bin"}
+    began = time.monotonic()
     proc = subprocess.Popen(
-        [sys.executable, "-I", "-c", CHILD, state],
+        [sys.executable, "-E", "-s", "-c", CHILD, state, src],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
@@ -873,30 +1080,10 @@ def test_a_worker_blocked_in_a_syscall_cannot_keep_the_process_alive(
             proc.kill()
             proc.wait()
     assert (proc.returncode, out, err) == (12, f"RESULT {code}\n".encode(), b"")
+    assert time.monotonic() - began < 0.3 + 3.0  # the deadline plus the 3 s end bound
 
 
 # --- the signal handler and the output of the CLI -----------------------------------------------
-
-
-def test_the_output_ignores_write_failures_from_the_move_to_writing_without_committing() -> None:
-    gate = cli._SignalGate()  # pyright: ignore[reportPrivateUsage]
-
-    class Broken:
-        def write(self, data: bytes, /) -> object:
-            raise BrokenPipeError
-
-        def flush(self) -> object:
-            return None
-
-    streams = cli.Streams(out=Broken(), err=Broken(), stdin_is_tty=lambda: False)
-    output = cli.Output(streams, verbose=False, quiet=False, gate=gate)
-    with pytest.raises(BrokenPipeError):
-        output.out("x")
-    output.writing_began()
-    output.out("x")  # ignored from here on
-    assert gate.committed is False  # a signal still counts as the deadline
-    output.result_printed()
-    assert gate.committed is True
 
 
 def test_the_gate_hook_makes_a_signal_the_deadline_instead_of_an_exit(

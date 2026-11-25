@@ -453,9 +453,9 @@ class FakeConnection:
     def settimeout(self, seconds: float) -> None:
         """As the real connection: it updates ``timeout``, and the live socket only before the
         response exists (afterwards the response owns the socket and keeps its timeout)."""
-        # todo(#25): the real connection freezes the socket timeout only for a will-close
+        # todo(#26): the real connection freezes the socket timeout only for a will-close
         # response; for a keep-alive reply ``settimeout`` still reaches the body read. The fake
-        # always freezes it. Per-operation timeouts (#25) must model the difference.
+        # always freezes it. Per-operation timeouts (#26) must model the difference.
         self.timeout = seconds
         if self._connected and not self.closed and not self._responded:
             _validate_socket_timeout(seconds)

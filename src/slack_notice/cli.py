@@ -215,17 +215,11 @@ class Output:
         self._gate = _SignalGate() if gate is None else gate
         self._lenient = False
 
-    def writing_began(self) -> None:
-        """The deadline gate moved to writing (``Deadline(on_writing=...)``): the request may be
-        on the wire, so from here on a failure to write the result is ignored (the exit code is
-        the result's). A signal still counts as the deadline, so nothing is committed."""
-        self._lenient = True
-
     def result_printed(self) -> None:
         """Called immediately BEFORE the result is written, once step 6 is over (a dry run has
         no step 6, so the print is its last step): from here on a write failure is ignored and a
         signal no longer ends the run, so the result is never cut short."""
-        self.writing_began()
+        self._lenient = True
         self.commit()
 
     def commit(self) -> None:
