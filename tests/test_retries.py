@@ -201,6 +201,8 @@ RETRY_AFTER_VALUES = [
 
 @pytest.mark.parametrize("value", RETRY_AFTER_VALUES)
 def test_a_retry_after_header_of_any_value_is_ignored(run: Callable[..., Run], value: str) -> None:
+    # The gateway Response exposes no headers, so this is a guard by construction: the headers
+    # only lengthen the head, and the retry loop cannot read them.
     hinted = Attempt(reply=Reply(status=429, body=b"{}", headers=(("Retry-After", value),)))
     r = run(hinted, hinted, hinted)
     outcome = r.work()

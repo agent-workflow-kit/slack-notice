@@ -443,9 +443,8 @@ class FakeConnection:
             else f"Content-Length: {len(reply.body)}\r\n"
         )
         extra = "".join(f"{name}: {value}\r\n" for name, value in reply.headers)
-        head_length = len(
-            f"HTTP/1.1 {reply.status} X\r\n{framing_header}{extra}Connection: close\r\n\r\n"
-        )
+        head = f"HTTP/1.1 {reply.status} X\r\n{framing_header}{extra}Connection: close\r\n\r\n"
+        head_length = len(head.encode())
         head_bytes = head_length if reply.head_stall_after is None else reply.head_stall_after
         if reply.head_trickle:
             for _ in range(head_bytes):
