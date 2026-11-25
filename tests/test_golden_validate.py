@@ -1,10 +1,11 @@
-"""Golden files for `validate` (#31): every ``--json`` document and human line, as raw bytes.
+"""Golden files for `validate` (#31, #32): every ``--json`` document and human line, as raw bytes.
 
 For scenario ``name`` the files under ``tests/golden/validate/`` are, when non-empty,
 ``name.stdout`` and ``name.stderr``. They were written by hand from docs/interface.md (validate,
-Output) and schemas/cli/validate.json, never generated from the code. validate opens no state
-directory, so there is no log or body file. The leak and path sweeps of tests/test_golden_send.py
-cover this directory too (they walk every golden file).
+Output) and schemas/cli/validate.json, never generated from the code. Plain validate opens no state
+directory, so there is no log or body file; `--test-message` does send, but its log and lock are
+checked in test_validate_test_message.py, not here. The leak and path sweeps of
+tests/test_golden_send.py cover this directory too (they walk every golden file).
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from slack_notice import cli
-from tests.fake_gateway import FakeGateway
+from tests.fake_gateway import Attempt, FakeGateway, Reply
 from tests.harness import assert_valid
 from tests.send_harness import ENV, go, write_config
 from tests.test_golden_send import compare
@@ -32,8 +33,11 @@ class Scenario:
     argv: list[str] = field(default_factory=lambda: ["validate", "--json"])
     config: str | None = None
     env: dict[str, str] | None = None  # None: the fake webhook environment
+    attempts: list[Attempt] = field(default_factory=list)  # the scripted answers of a send
 
 
+TM = ["validate", "--json", "--test-message"]
+SERVER_ERROR = Attempt(reply=Reply(status=500, body=b"{}"))
 UNSET: dict[str, str] = {}
 WRONG = {"SLACK_WEBHOOK": "https://example.invalid/not-a-trigger"}
 SCENARIOS = [
@@ -47,6 +51,21 @@ SCENARIOS = [
     Scenario("config_invalid", 2, config="max_chars: 5\n"),
     Scenario("config_invalid_human", 2, ["validate"], config="max_chars: 5\n"),
     Scenario("usage_unknown_flag", 2, ["validate", "--json", "--bogus"]),
+    Scenario("test_message_ok", 0, TM, attempts=[Attempt()]),
+    Scenario("test_message_ok_human", 0, ["validate", "--test-message"], attempts=[Attempt()]),
+    Scenario("test_message_failed", 12, TM, attempts=[SERVER_ERROR]),
+    Scenario(
+        "test_message_failed_human", 12, ["validate", "--test-message"], attempts=[SERVER_ERROR]
+    ),
+    Scenario("test_message_credential_unset", 12, TM, env=UNSET),
+    Scenario("test_message_disabled", 22, TM, config="enabled: false\n", env=UNSET),
+    Scenario(
+        "test_message_disabled_human",
+        22,
+        ["validate", "--test-message"],
+        config="enabled: false\n",
+        env=UNSET,
+    ),
 ]
 NAMES = [s.name for s in SCENARIOS]
 
@@ -58,9 +77,12 @@ def test_golden_validate_outputs(
     monkeypatch.setattr(cli, "__version__", "1.2.3")
     config = None if scenario.config is None else write_config(tmp_path, scenario.config)
     env = ENV if scenario.env is None else scenario.env
+    fake_gateway.script(*scenario.attempts)
     sent = go(scenario.argv, fake_gateway, config=config, env=env)
     assert sent.code == scenario.exit, (sent.stdout, sent.stderr)
-    assert fake_gateway.connections == [] and sent.state_files == {}
+    assert len(fake_gateway.connections) == len(scenario.attempts)
+    # only a real send of the test message opens the state directory (lock and log)
+    assert bool(sent.state_files) == bool(scenario.attempts)
     compare(DIR / f"{scenario.name}.stdout", sent.out)
     compare(DIR / f"{scenario.name}.stderr", sent.err)
 
@@ -87,5 +109,12 @@ def test_the_goldens_cover_every_check_outcome() -> None:
         json.loads(p.read_bytes()) for p in DIR.glob("*.stdout") if "checks" in p.read_text()
     ]
     shapes = {(d["ok"], d["enabled"], len(d["checks"])) for d in documents}
-    assert shapes == {(True, True, 2), (True, False, 2), (False, True, 2), (False, False, 2)}
-    assert {s.exit for s in SCENARIOS} == {0, 2, 12}
+    assert shapes == {
+        (True, True, 2),
+        (True, False, 2),
+        (False, True, 2),
+        (False, False, 2),
+        (True, True, 3),
+        (False, True, 3),
+    }
+    assert {s.exit for s in SCENARIOS} == {0, 2, 12, 22}

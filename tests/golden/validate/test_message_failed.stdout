@@ -1,0 +1,1 @@
+{"ok":false,"enabled":true,"checks":[{"name":"config","ok":true,"message":"configuration is valid"},{"name":"credential","ok":true,"message":"the webhook credential is set and has the form of a workflow trigger URL"},{"name":"test_message","ok":false,"message":"the test message failed; delivery is not observable, so look at the destination to see whether it arrived"}]}

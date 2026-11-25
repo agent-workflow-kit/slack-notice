@@ -428,18 +428,16 @@ def test_validate_never_reads_stdin_even_when_it_is_a_terminal_or_a_pipe(
     fake_gateway.source_script.clear()
 
 
-# --- the --test-message seam (#32) ----------------------------------------------------------------
+# --- the --test-message flag (#32; the behavior is tested in test_validate_test_message.py) -----
 
 
-def test_test_message_is_parsed_but_not_implemented_until_32(
+def test_test_message_with_a_broken_credential_never_sends(
     fake_gateway: FakeGateway, tmp_path: Path
 ) -> None:
-    """TODO(#32): replace with the real behavior. Until then the flag parses and the run ends as
-    an internal error (exit 1) before anything is read or sent."""
-    env = Recording(crowded(tmp_path))
+    env = Recording({**crowded(tmp_path), ENV_NAME: "not a url"})
     sent = go([*VALIDATE, "--test-message"], fake_gateway, env=env)
-    assert sent.code == 1 and sent.error["code"] == "internal"
-    assert env.log == [] and fake_gateway.connections == []
+    assert (sent.code, sent.document) == (12, document(*BAD, ok=False))
+    assert env.log == [("getitem", ENV_NAME)]
     assert_untouched(sent, fake_gateway)
 
 

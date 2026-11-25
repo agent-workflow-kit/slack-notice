@@ -1,0 +1,3 @@
+config: ok (configuration is valid)
+credential: ok (the webhook credential is set and has the form of a workflow trigger URL)
+test_message: failed (the test message failed; delivery is not observable, so look at the destination to see whether it arrived)

@@ -169,7 +169,10 @@ def test_help_lists_the_exact_flags(fake_gateway: FakeGateway) -> None:
         "--version",
     ):
         assert flag in send_help
-    assert "--test-message" in run(["validate", "--help"], fake_gateway).stdout
+    validate_help = run(["validate", "--help"], fake_gateway).stdout
+    assert "--test-message" in validate_help
+    expected = "send one real test notification to Slack (logged like a send)"
+    assert expected in " ".join(validate_help.split())
 
 
 # --- usage errors -------------------------------------------------------------------------
@@ -645,13 +648,14 @@ def test_handler_return_value_is_the_exit_code(
     assert run(["send"], fake_gateway).code == 22
 
 
-def test_validate_test_message_is_an_internal_error_until_its_issue_lands(
+def test_validate_test_message_with_an_unset_credential_ends_at_the_credential_check(
     fake_gateway: FakeGateway,
 ) -> None:
-    # TODO(#32): remove when validate --test-message is implemented.
     result = run(["validate", "--test-message"], fake_gateway)
-    assert result.code == 1
-    assert result.stderr == "internal: internal error (NotImplementedError)\n"
+    assert result.code == 12
+    assert result.stderr.splitlines()[0] == "config: ok (configuration is valid)"
+    assert result.stderr.splitlines()[1].startswith("credential: failed (")
+    assert len(result.stderr.splitlines()) == 2 and fake_gateway.connections == []
 
 
 class CustomError(Exception):
