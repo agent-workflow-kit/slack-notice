@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from slack_notice import cli, payload
+from slack_notice import cli, payload, webhook
 from slack_notice.cli import Context, Streams, main
 from slack_notice.gateway import SourceRead
 from tests.fake_gateway import FakeGateway
@@ -552,7 +552,7 @@ def test_timeout_and_cap_messages_are_fixed_strings(
 
     timeouts = {message_of(SourceRead(b"x" * n, timed_out=True)) for n in (1, 50)}
     caps = {message_of(SourceRead(b"x" * n, too_large=True)) for n in (1, 50)}
-    assert timeouts == {cli.INPUT_TIMEOUT_MESSAGE}
+    assert timeouts == {webhook.unavailable("input").message}
     assert caps == {payload.REFUSAL_MESSAGES["too_large"]}
 
 

@@ -9,7 +9,7 @@ text can reach the file; ``append_record`` writes it under the ``log.lock`` floc
 1 MiB. ``log_result`` is the one call the ``send`` command makes after the result was printed:
 it never raises for a filesystem problem and never changes the exit code.
 
-TODO(#28): the send command calls ``log_result`` after step 7's output and closes the StateDir.
+The send command calls ``log_result`` after step 7's output and closes the StateDir.
 The send lock (``spacing.acquire``) opens ``send.lock`` through the same ``StateDir`` handle.
 """
 

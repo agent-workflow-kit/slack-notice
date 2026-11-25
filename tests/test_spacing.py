@@ -261,10 +261,10 @@ def test_the_stamp_marks_an_existing_file_without_growing_it(
     with take(state, gw, FAR) as lock:
         assert lock is not None
         lock.stamp()
-        lock.stamp()  # a second call does nothing
+        lock.stamp()  # every attempt stamps again; the file never grows
     assert path.stat().st_size == 1
     assert path.stat().st_mtime == pytest.approx(WALL, abs=1e-3)
-    assert gw.events.count("set_mtime") == 1
+    assert gw.events.count("set_mtime") == 2
 
 
 # --- the lock and the deadline ---------------------------------------------------------------

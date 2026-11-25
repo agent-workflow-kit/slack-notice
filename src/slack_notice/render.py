@@ -4,8 +4,8 @@
 request body. Nothing is escaped: the trigger variable is plain text. The link is counted and
 written exactly as given and never cut.
 
-The dry run (``cli.send``) prints ``Rendered.text`` and reports ``bytes`` and ``truncated``.
-TODO(#28): the send path posts ``Rendered.body``.
+The dry run (``cli.send``) prints ``Rendered.text`` and reports ``bytes`` and ``truncated``; the
+send path posts ``Rendered.body`` as it is.
 """
 
 from __future__ import annotations

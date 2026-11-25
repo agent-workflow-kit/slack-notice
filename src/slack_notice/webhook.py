@@ -14,7 +14,7 @@ is ``map_attempt`` (#24, below). The gate, the daemon worker and the hard exit a
 ``slack_notice.deadline`` (#25).
 
 The retry loop is ``slack_notice.deadline.attempt_work`` (#26).
-TODO(#28): call ``read_webhook`` at send step 5 and map ``CredentialInvalid`` to exit 12
+The send calls ``read_webhook`` at step 5 and maps ``CredentialInvalid`` to exit 12
 ``credential_invalid`` with ``details.env``.
 """
 

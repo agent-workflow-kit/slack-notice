@@ -18,13 +18,12 @@ the send command reports as exit 12 ``unavailable`` with ``details.phase`` ``loc
 other ``BaseException`` (a signal handler's, ``KeyboardInterrupt``) propagates after the lock
 and the descriptor were released. No text from the file or the filesystem is kept.
 
-TODO(#28): the deadline is passed in as an absolute ``gateway.monotonic()`` value; wiring the
-gate into the send flow is #28.
-A ``stop`` callback (the send passes ``Deadline.signalled``) is polled before every flock poll
-and between the slices (at most 100 ms) of the spacing wait: a signal during either wait is the
-deadline, so it raises ``SendLockTimeout`` within 100 ms, with the lock released.
-TODO(#28): the send command maps ``SendLockTimeout`` to the exit 12 envelope and a ``failed``
-log record, calls ``stamp`` just before the POST and ``release`` after step 6.
+The deadline is passed in as an absolute ``gateway.monotonic()`` value.
+A ``stop`` callback (the send passes ``lambda: deadline.signalled``) is polled before every
+flock poll and between the slices (at most 100 ms) of the spacing wait: a signal during either
+wait is the deadline, so it raises ``SendLockTimeout`` within 100 ms, with the lock released.
+The send command maps ``SendLockTimeout`` to the exit 12 envelope and a ``failed`` log record,
+calls ``stamp`` before each attempt's write and ``release`` after step 6.
 """
 
 from __future__ import annotations
@@ -52,7 +51,6 @@ class SendLock:
         self._gateway = gateway
         self._fd: int | None = fd
         self._locked = False
-        self._stamped = False
 
     def mark_locked(self) -> None:
         """Record that the flock is held, so ``release`` unlocks it."""
@@ -70,14 +68,16 @@ class SendLock:
         self.release()
 
     def stamp(self) -> None:
-        """Mark this send's start: one byte into an empty file, then the modification time.
+        """Mark the start of a write attempt: one byte into an empty file (a file that has a byte
+        is not grown), then the modification time.
 
-        Once per lock; nothing after ``release``. A failure (``ENOSPC``, ``EROFS``, ...) is the
-        one warning and never an exception: the send goes on.
+        Called before EACH attempt's write (up to four per send: every retry attempt stamps
+        again, so the modification time is the start of the last write attempt). Safe to repeat;
+        nothing after ``release``. A failure (``ENOSPC``, ``EROFS``, ...) is the one warning and
+        never an exception: the send goes on.
         """
-        if self._fd is None or self._stamped:
+        if self._fd is None:
             return
-        self._stamped = True
         gateway, fd = self._gateway, self._fd
         try:
             if gateway.file_size(fd) == 0 and gateway.write_fd(fd, b"\n") != 1:

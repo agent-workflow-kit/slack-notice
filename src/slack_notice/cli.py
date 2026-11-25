@@ -37,7 +37,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, NoReturn, Protocol
 
-from slack_notice import __version__
+from slack_notice import __version__, webhook
 from slack_notice.config import (
     ConfigInvalid,
     HomeUnusable,
@@ -46,8 +46,9 @@ from slack_notice.config import (
     resolve_home,
     validate_config,
 )
+from slack_notice.deadline import Deadline, attempt_work, conclude
 from slack_notice.gateway import Gateway, SystemGateway
-from slack_notice.log import StateDir
+from slack_notice.log import StateDir, dedupe_key_sha256, log_result, message_sha256
 from slack_notice.payload import (
     EmptyMessage,
     FieldRefused,
@@ -62,7 +63,8 @@ from slack_notice.payload import (
     sanitize_notification,
     validate_notification,
 )
-from slack_notice.render import render
+from slack_notice.render import Rendered, render
+from slack_notice.spacing import SendLock, SendLockTimeout, acquire
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
 ERROR_EXIT_CODES = frozenset({1, 2, 12, 20})
@@ -143,6 +145,21 @@ class CliError(Exception):
 
 def usage_error(message: str = USAGE_MESSAGE) -> CliError:
     return CliError(2, "usage", message)
+
+
+def error_from_outcome(outcome: webhook.Outcome) -> CliError:
+    """An exit 12 ``Outcome`` (fixed message, flags and details) as a ``CliError``, so the
+    messages are defined once, in ``slack_notice.webhook``."""
+    assert outcome.exit_code == 12 and outcome.code is not None
+    return CliError(
+        12,
+        outcome.code,
+        outcome.message,
+        details=None if outcome.details is None else dict(outcome.details),
+        retryable=outcome.retryable,
+        retry_after_s=outcome.retry_after_s,
+        unknown_outcome=outcome.unknown_outcome,
+    )
 
 
 class _EarlyExit(Exception):
@@ -226,6 +243,10 @@ class Output:
         """The result print begins: a signal from here on is ignored."""
         self._gate.commit()
 
+    def arm(self, hook: Callable[[], None]) -> None:
+        """Step 5 begins: a signal is the deadline passing (``hook``), not an exit."""
+        self._gate.arm(hook)
+
     def _write(self, sink: ByteSink, text: str) -> None:
         data = text.encode("utf-8", errors="replace")
         try:
@@ -293,22 +314,26 @@ class Context:
     home: str | None  # None only for `send --dry-run --config`, which needs no home
     actor: str
     actor_source: str
-    # TODO(#28): set from ``Verdict.gate_writing`` (``slack_notice.deadline``); exit 1 then
-    # reports unknown_outcome true.
+    # Set from ``Verdict.gate_writing`` (``slack_notice.deadline``) by the send; an exit 1 then
+    # reports unknown_outcome true and is logged.
     gate_writing: bool = field(default=False)
     _state: StateDir | None = field(default=None, repr=False)
 
     def state_dir(self) -> StateDir:
         """The run's state directory handle (lazy: nothing is opened until a file is needed).
 
-        Never called for ``send --dry-run --config`` (home is None, no state is used).
+        Never called for a dry run (it uses no state): the real send asks for it at the send
+        lock and the log step, and closes it at the end (``close_state``).
         """
         assert self.home is not None, "state directory requested without a home"
-        # todo(#28): close the StateDir (with-scope or close()) when wiring send; call state_dir()
-        # only after the dry-run exemption
         if self._state is None:
             self._state = StateDir(self.gateway, self.home, self.output.warning)
         return self._state
+
+    def close_state(self) -> None:
+        """Release the state directory descriptor (safe to call again, or when never opened)."""
+        if self._state is not None:
+            self._state.close()
 
 
 def sanitize_login(name: str | None) -> str:
@@ -535,8 +560,8 @@ class _SignalGate:
         self.fired: int | None = None  # the signal that is ending the run before step 5
 
     def arm(self, hook: Callable[[], None]) -> None:
-        """Step 5 begins: a signal is now the deadline passing, not an exit. TODO(#28): the send
-        calls this with ``Deadline.note_signal`` before it takes the lock."""
+        """Step 5 begins: a signal is now the deadline passing, not an exit. The send calls this
+        with ``Deadline.note_signal`` before it reads the credential and takes the lock."""
         self.on_signal = hook
 
     def commit(self) -> None:
@@ -636,7 +661,7 @@ def load_settings(ctx: Context) -> dict[str, Any]:
     same error with the config key name (or `?`) in details.key and a message that names the key
     and the rule (never the value).
     """
-    # The send dry run calls this; TODO(#28), TODO(#31), TODO(#32): the real send and validate.
+    # The send calls this; TODO(#31), TODO(#32): validate.
     key: str | None = None
     message = ""
     settings: dict[str, Any] = {}
@@ -659,8 +684,6 @@ def load_settings(ctx: Context) -> dict[str, Any]:
 
 
 INPUT_FILE_MESSAGE = "--file cannot be read or is not a regular file"
-# todo(#28): use webhook.unavailable("input") so the message is not defined twice
-INPUT_TIMEOUT_MESSAGE = "input did not arrive before the deadline; nothing was sent"
 
 
 def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
@@ -670,8 +693,8 @@ def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
     ``remaining`` is the seconds left of the deadline, which starts at step 3. The caller
     never sees input text in an error.
 
-    The dry run calls this and starts the deadline. TODO(#28): the real send logs ``failed`` for the
-    timeout error (a log record for exit 12 ``unavailable``, phase ``input``).
+    The send calls this after it started the deadline; the real send logs ``failed`` for the
+    timeout error (exit 12 ``unavailable``, phase ``input``).
     A signal during this call raises ``_Signalled`` from the handler of ``_exit_on_signal``.
     """
     file_arg: str | None = ctx.args.file
@@ -694,14 +717,7 @@ def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
             details={"pointer": refused.pointer},
         )
     except InputTimedOut:
-        error = CliError(
-            12,
-            "unavailable",
-            INPUT_TIMEOUT_MESSAGE,
-            details={"phase": "input"},
-            retryable=True,
-            unknown_outcome=False,
-        )
+        error = error_from_outcome(webhook.unavailable("input"))
     except SourceUnusable:
         error = usage_error(INPUT_FILE_MESSAGE)
     raise error  # raised outside the handlers: no __context__ (it would hold input text)
@@ -780,30 +796,55 @@ def _disabled(ctx: Context) -> int:
     return 22
 
 
+@dataclass
+class _Progress:
+    """What steps 3 and 4 have produced so far: the facts the log record is built from."""
+
+    level: str | None = None  # a level that passed validation, before the sanitizer
+    notification: Sanitized | None = None
+    rendered: Rendered | None = None
+
+
+def _prepare(
+    ctx: Context, settings: dict[str, Any], started: float, progress: _Progress
+) -> tuple[Sanitized, Rendered]:
+    """Steps 3 and 4, shared by the dry run and the real send: input, sanitizer, render.
+
+    The deadline started at ``started``; ``settings["timeout"]`` seconds remain for the input.
+    Raises ``CliError`` (exit 2, 12 ``unavailable``/``input`` or 20).
+    """
+    loaded = load_notification(ctx, settings["timeout"])
+    level = loaded.get("level")
+    progress.level = level if isinstance(level, str) else None
+    notification = sanitize_loaded(loaded)
+    progress.level, progress.notification = notification.level, notification
+    ctx.output.phase("input", _elapsed_ms(ctx, started))
+    phase_start = ctx.gateway.monotonic()
+    rendered = render(notification, settings)  # step 4
+    progress.rendered = rendered
+    ctx.output.phase("render", _elapsed_ms(ctx, phase_start))
+    return notification, rendered
+
+
 def send(ctx: Context) -> int:
     """The `send` command (interface: Send, steps 1 to 7).
 
     Step 1 ran in ``parse`` and ``check_stdin_source``, and the home lookup of step 2 in ``_run``.
-    Only the dry run is implemented: it ends at step 4 and uses no credential, no state
-    directory, no lock and no log (``ctx.env`` and ``ctx.state_dir()`` are not touched).
+    Config and ``enabled`` come first (exit 2 and 22 are results of their own), then the dry run
+    (steps 3 and 4 only: no credential, no state directory, no lock, no log, no network), then
+    the real send.
     """
-    if not ctx.dry_run:
-        # TODO(#28): steps 1 to 7 of a real send; the shared steps 2 to 4 move out of
-        # ``_dry_run`` into this function, and steps 5 to 7 follow them.
-        return _not_implemented(ctx)
-    return _dry_run(ctx)
-
-
-def _dry_run(ctx: Context) -> int:
     settings = load_settings(ctx)  # step 2: config over defaults (exit 2 config_invalid)
     if not settings["enabled"]:
         return _disabled(ctx)
+    if ctx.dry_run:
+        return _dry_run(ctx, settings)
+    return _real_send(ctx, settings)
+
+
+def _dry_run(ctx: Context, settings: dict[str, Any]) -> int:
     started = ctx.gateway.monotonic()  # step 3: the deadline starts here
-    notification = sanitize_loaded(load_notification(ctx, settings["timeout"]))
-    ctx.output.phase("input", _elapsed_ms(ctx, started))
-    phase_start = ctx.gateway.monotonic()
-    rendered = render(notification, settings)  # step 4
-    ctx.output.phase("render", _elapsed_ms(ctx, phase_start))
+    notification, rendered = _prepare(ctx, settings, started, _Progress())
     ctx.output.result_printed()  # before the print: a dry run has no step 6
     if ctx.json:
         ctx.output.json_document(
@@ -824,6 +865,212 @@ def _dry_run(ctx: Context) -> int:
     return 0
 
 
+# --- the real send: steps 3 to 7 -----------------------------------------------------------------
+
+
+@dataclass
+class _Result:
+    """A finished send: the exit code, the print, and the log fields the result decides."""
+
+    code: int
+    emit: Callable[[], None]
+    log: dict[str, Any]
+
+
+def _error_result(ctx: Context, error: CliError, *, http_status: int | None = None) -> _Result:
+    """A failure as a result: the envelope and the line are printed, the record is logged."""
+    return _Result(
+        error.exit_code,
+        lambda: _emit(ctx.output, error, json_mode=ctx.json),
+        {
+            "exit_code": error.exit_code,
+            "code": error.code,
+            "reason": error.reason,
+            "unknown_outcome": bool(error.unknown_outcome),
+            "http_status": http_status,
+        },
+    )
+
+
+def _sent_result(
+    ctx: Context, notification: Sanitized, rendered: Rendered, started: float
+) -> _Result:
+    duration_ms = _elapsed_ms(ctx, started)
+
+    def emit() -> None:
+        ctx.output.result_printed()  # the print begins: a signal no longer ends the run
+        if ctx.json:
+            ctx.output.json_document(
+                {
+                    "outcome": "sent",
+                    "tool": "slack-notice",
+                    "level": notification.level,
+                    "truncated": rendered.truncated,
+                    "bytes": rendered.bytes,
+                    "duration_ms": duration_ms,
+                    "http_status": 200,
+                    "dedupe_key": ctx.args.dedupe_key,
+                }
+            )
+        else:
+            ctx.output.info(f"sent ({notification.level}, {duration_ms} ms)")
+
+    return _Result(
+        0,
+        emit,
+        {
+            "exit_code": 0,
+            "code": None,
+            "reason": None,
+            "unknown_outcome": False,
+            "http_status": 200,
+        },
+    )
+
+
+def _verdict_result(
+    ctx: Context,
+    verdict_outcome: webhook.Outcome | None,
+    error_class: str | None,
+    progress: _Progress,
+    started: float,
+) -> _Result:
+    """The result of the network phase (``Verdict``): sent, an exit 12 envelope or exit 1."""
+    if verdict_outcome is None:
+        assert error_class is not None
+        return _error_result(ctx, _internal_error_named(error_class, gate_writing=ctx.gate_writing))
+    if verdict_outcome.exit_code == 0:
+        assert progress.notification is not None and progress.rendered is not None
+        return _sent_result(ctx, progress.notification, progress.rendered, started)
+    return _error_result(
+        ctx, error_from_outcome(verdict_outcome), http_status=verdict_outcome.http_status
+    )
+
+
+def _stamp_hook(ctx: Context, locks: list[SendLock]) -> Callable[[], None]:
+    """The gate's ``on_writing``: the send lock's stamp before EACH attempt's write.
+
+    It runs once per attempt that reaches writing (up to four per send), under the gate's lock.
+    A failure of the stamp is a state problem, and a state problem never fails a send: the hook
+    swallows every ``Exception`` (one warning). If it raised, the gate would go back to idle and
+    the send would end exit 1 with ``unknown_outcome`` false, so a known 429 or connection
+    failure would be replaced by an internal error. Nothing is swallowed that is not an
+    ``Exception``.
+    """
+
+    def stamp() -> None:
+        try:
+            for lock in locks:
+                lock.stamp()
+        except Exception:
+            ctx.state_dir().warn()
+
+    return stamp
+
+
+def _send_and_report(
+    ctx: Context, settings: dict[str, Any], started: float, progress: _Progress
+) -> _Result:
+    """Steps 3 to 6; a ``CliError`` here is a failure that is printed and logged (exit 12, 20)."""
+    at = started + settings["timeout"]
+    locks: list[SendLock] = []
+    deadline = Deadline(ctx.gateway, at=at, on_writing=_stamp_hook(ctx, locks))
+    notification, rendered = _prepare(ctx, settings, started, progress)
+    phase_start = ctx.gateway.monotonic()
+    # Step 5. From here a signal is the deadline passing (outcome by phase), never an exit.
+    ctx.output.arm(deadline.note_signal)
+    name: str = settings["webhook_env"]
+    target: webhook.Webhook | None = None
+    try:
+        target = webhook.read_webhook(ctx.env, name)
+    except webhook.CredentialInvalid:
+        pass
+    if target is None:  # raised here, not in the handler: no context is kept
+        raise error_from_outcome(webhook.credential_invalid(name))
+    # Step 6. The lock is asked for only now (a real send), and a signal while waiting for it is
+    # the deadline (``unavailable``, phase ``lock``).
+    timed_out = False
+    lock: SendLock | None = None
+    try:
+        lock = acquire(ctx.state_dir(), ctx.gateway, at, stop=lambda: deadline.signalled)
+    except SendLockTimeout:
+        timed_out = True
+    if timed_out:
+        raise error_from_outcome(webhook.unavailable("lock"))
+    if lock is not None:
+        locks.append(lock)
+    try:
+        verdict = deadline.run(
+            attempt_work(ctx.gateway, target, rendered.body, timeout=settings["timeout"])
+        )
+    finally:
+        if lock is not None:
+            lock.release()  # before the log step: send.lock and log.lock are never both held
+    ctx.gate_writing = verdict.gate_writing
+    ctx.output.phase("send", _elapsed_ms(ctx, phase_start))
+    return _verdict_result(ctx, verdict.outcome, verdict.error_class, progress, started)
+
+
+def _real_send(ctx: Context, settings: dict[str, Any]) -> int:
+    """Steps 3 to 7 of a send that is not a dry run. Never returns: the result is printed, then
+    logged, then the process ends through ``gateway.exit_now`` (``conclude``), the one place
+    that may end it while a worker can still be blocked. Only an exit 2 (a ``--file`` problem
+    at step 3) and an exit 1 before any gate move are raised to ``_main`` instead: they are not
+    logged and the run ends by returning."""
+    started = ctx.gateway.monotonic()  # step 3: the deadline starts here
+    progress = _Progress()
+    try:
+        try:
+            result = _send_and_report(ctx, settings, started, progress)
+        except CliError as error:
+            if error.exit_code not in (12, 20):
+                raise
+            result = _error_result(ctx, error)
+        _conclude(ctx, settings, started, progress, result)
+    finally:
+        ctx.close_state()
+    raise RuntimeError("exit_now returned")  # unreachable: the gateway's exit does not return
+
+
+def _conclude(
+    ctx: Context, settings: dict[str, Any], started: float, progress: _Progress, result: _Result
+) -> None:
+    """Step 7: print and flush, then the log record, then the exit (``deadline.conclude``)."""
+    notification, rendered = progress.notification, progress.rendered
+    facts: dict[str, Any] = {
+        "level": progress.level,
+        "bytes_": None if rendered is None else rendered.bytes,
+        "truncated": None if rendered is None else rendered.truncated,
+        "message_hash": None
+        if notification is None
+        else message_sha256(notification.title_text, notification.message),
+        "dedupe_hash": None
+        if notification is None or ctx.args.dedupe_key is None
+        else dedupe_key_sha256(ctx.args.dedupe_key),
+    }
+
+    def record() -> None:
+        try:
+            log_start = ctx.gateway.monotonic()
+            log_result(
+                ctx.state_dir(),
+                ctx.gateway,
+                enabled=settings["log"],
+                version=__version__,
+                duration_ms=_elapsed_ms(ctx, started),
+                gate_writing=ctx.gate_writing,
+                actor=ctx.actor,
+                actor_source=ctx.actor_source,
+                **facts,
+                **result.log,
+            )
+            ctx.output.phase("log", _elapsed_ms(ctx, log_start))
+        finally:
+            ctx.close_state()
+
+    conclude(ctx.gateway, result.code, emit=result.emit, flush=ctx.output.finish, record=record)
+
+
 # TODO(#31), TODO(#32): validate.
 HANDLERS: dict[str, Callable[[Context], int]] = {
     "send": send,
@@ -832,7 +1079,10 @@ HANDLERS: dict[str, Callable[[Context], int]] = {
 
 
 def _internal_error(exc: Exception, *, gate_writing: bool) -> CliError:
-    name = type(exc).__name__
+    return _internal_error_named(type(exc).__name__, gate_writing=gate_writing)
+
+
+def _internal_error_named(name: str, *, gate_writing: bool) -> CliError:
     if CLASS_NAME_PATTERN.fullmatch(name) is None:
         name = "Exception"
     return CliError(
@@ -968,8 +1218,8 @@ def _main(
     # Only Exception is caught: SystemExit, KeyboardInterrupt and ``_Signalled`` (a signal, see
     # ``_exit_on_signal``) pass straight through.
     try:
-        # TODO(#28): a real send reads the credential from the environment at step 5; a dry run
-        # never does, so the copy is made on first access only.
+        # A real send reads the credential from the environment at step 5; a dry run never
+        # does, so the copy is made on first access only.
         lazy_env = _LazyEnv(gateway) if env is None else env
         code = _run(argv, lazy_env, gateway, streams, holder, gate)
     except _EarlyExit as early:
