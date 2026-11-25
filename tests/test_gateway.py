@@ -259,7 +259,8 @@ FS_PATH_NAMES = frozenset({"isdir", "isfile", "exists", "lexists", "islink", "ge
 
 
 def filesystem_references(source: str) -> list[str]:
-    """Direct filesystem probes (``os.path.isdir``, ``os.stat``, ``os.open``, ...), by attribute
+    """Direct filesystem access: builtin ``open(``, any ``pathlib`` import, and probes
+    (``os.path.isdir``, ``os.stat``, ``os.open``, ...), by attribute
     on ``os`` or ``os.path`` (tracked through ``import os`` / ``import os.path`` and aliases)
     and by ``from os import x`` / ``from os.path import x``. Pure string helpers such as
     ``os.path.join`` are not flagged. All file access belongs to the gateway."""
@@ -271,16 +272,43 @@ def filesystem_references(source: str) -> list[str]:
         for a in node.names
         if a.name in ("os", "os.path") and (a.asname or a.name == "os" or a.name == "os.path")
     }
+    # Names bound directly to the os.path module: ``import os.path as p``, ``from os import path``.
+    path_aliases = {
+        a.asname
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for a in node.names
+        if a.name == "os.path" and a.asname
+    } | {
+        (a.asname or a.name)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "os"
+        for a in node.names
+        if a.name == "path"
+    }
     found: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.level == 0:
-            if node.module == "os":
+        if isinstance(node, ast.Import):
+            found += [f"import {a.name}" for a in node.names if a.name.split(".")[0] == "pathlib"]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            if (node.module or "").split(".")[0] == "pathlib":
+                found.append(f"from {node.module} import ...")
+            elif node.module == "os":
                 found += [f"os.{a.name}" for a in node.names if a.name in FS_OS_NAMES]
             elif node.module == "os.path":
                 found += [f"os.path.{a.name}" for a in node.names if a.name in FS_PATH_NAMES]
-        elif isinstance(node, ast.Attribute):
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "open":
+                found.append("open")
+        if isinstance(node, ast.Attribute):
             base = node.value
-            if isinstance(base, ast.Name) and base.id in os_aliases and node.attr in FS_OS_NAMES:
+            if (
+                isinstance(base, ast.Name)
+                and base.id in path_aliases
+                and node.attr in FS_PATH_NAMES
+            ):
+                found.append(f"os.path.{node.attr}")
+            elif isinstance(base, ast.Name) and base.id in os_aliases and node.attr in FS_OS_NAMES:
                 found.append(f"os.{node.attr}")
             elif (
                 isinstance(base, ast.Attribute)
@@ -302,6 +330,14 @@ def filesystem_references(source: str) -> list[str]:
         "import os\nos.open('x', 0)",
         "from os import stat",
         "from os.path import isfile",
+        "import os.path as p\np.isdir('x')",
+        "from os import path\npath.isdir('x')",
+        "from os import path as q\nq.exists('x')",
+        "import pathlib",
+        "import pathlib as pl",
+        "from pathlib import Path",
+        "import pathlib\npathlib.Path('x').is_dir()",
+        "open('x')",
     ],
 )
 def test_filesystem_checker_detects_probes(source: str) -> None:
@@ -315,6 +351,11 @@ def test_filesystem_checker_detects_probes(source: str) -> None:
         "import os\nos.path.isabs('/x')",
         "class A:\n    def f(self):\n        return self.stat",
         "def f(g):\n    return g.is_directory('x')",
+        "import os.path as p\np.join('a', 'b')",
+        "from os import path\npath.join('a', 'b')",
+        "def f(x):\n    return x.open('y')",
+        "def open(x):\n    return x\n",
+        "import pathlib_like",
     ],
 )
 def test_filesystem_checker_accepts_other_references(source: str) -> None:
