@@ -645,14 +645,13 @@ def test_handler_return_value_is_the_exit_code(
     assert run(["send"], fake_gateway).code == 22
 
 
-def test_unimplemented_commands_are_internal_errors_until_their_issues_land(
+def test_validate_is_an_internal_error_until_its_issue_lands(
     fake_gateway: FakeGateway,
 ) -> None:
-    # TODO(#28) / TODO(#31): remove when send and validate are implemented.
-    for command in ("send", "validate"):
-        result = run([command], fake_gateway)
-        assert result.code == 1
-        assert result.stderr == "internal: internal error (NotImplementedError)\n"
+    # TODO(#31) / TODO(#32): remove when validate is implemented.
+    result = run(["validate"], fake_gateway)
+    assert result.code == 1
+    assert result.stderr == "internal: internal error (NotImplementedError)\n"
 
 
 class CustomError(Exception):
@@ -705,7 +704,7 @@ def test_exit_one_with_json_prints_the_internal_envelope(
 def test_exit_one_after_the_gate_moved_to_writing_says_unknown_outcome(
     monkeypatch: pytest.MonkeyPatch, fake_gateway: FakeGateway
 ) -> None:
-    # TODO(#28): the deadline gate owns this flag; the skeleton only carries it.
+    # The send sets this flag from the deadline's verdict; the skeleton only carries it.
     def handler(ctx: Context) -> int:
         ctx.gate_writing = True
         raise RuntimeError(SECRET)
