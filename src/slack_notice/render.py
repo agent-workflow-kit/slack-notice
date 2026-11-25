@@ -10,6 +10,7 @@ TODO(#28): the send path posts ``Rendered.body``.
 
 from __future__ import annotations
 
+import builtins
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ class Rendered:
     length; ``truncated`` whether the title or the message was cut."""
 
     text: str
-    body: bytes
+    body: builtins.bytes
     truncated: bool
 
     @property

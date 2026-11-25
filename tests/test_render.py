@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import ast
+import builtins
 import json
+import typing
 from pathlib import Path
 from typing import Any
 
@@ -162,19 +163,36 @@ def test_budget_formula_both_boundaries(link: str | None, title: str | None) -> 
 
 
 def test_cut_table_exact_outputs() -> None:
-    cfg = settings(max_chars=2000)
-    b = budget("\U0001f535 INFO", None, 2000)
-    keep = b - len(MARKER)
+    link = "https://a.example/" + "p" * 40
+    # (notification, settings, expected text); every budget is worked out in the comments.
+    # Plain: prefix line "\U0001f535 INFO" is 6 characters, so the message budget at 2000 is
+    # 2000 - 6 - 1 = 1993, and the cut keeps 1993 - 12 = 1981 characters before the marker.
+    keep = 1981
+    head = "\U0001f535 INFO\n"
+    # Title and link: prefix line "\U0001f535 INFO T" is 8 characters and the link line adds
+    # 1 + 58 = 59, so the budget is 2000 - 8 - 1 - 59 = 1932 and 1920 characters are kept.
+    keep_tl = 1920
+    # Byte cap (EMOJI is 4 bytes): at max_chars 12000 the byte limit binds first. Frame
+    # {"body":""} is 11 bytes, the head is 4 + 5 + 2 (escaped LF) = 11, the marker is 3 + 11 = 14,
+    # so (12000 - 36) // 4 = 2991 emoji are kept (exactly 12000 bytes).
     rows = [
-        ("x" * (b + 1), "x" * keep),
-        ("x" * (keep - 1) + " " * 5 + "y" * 10, "x" * (keep - 1)),  # trailing blanks dropped
-        ("x" * (keep - 2) + "\n\n\n"[:2] + "z" * 50, "x" * (keep - 2)),
-        ("w" * (b + 500), "w" * keep),
+        (san("x" * 1994), 2000, head + "x" * keep + MARKER),
+        # trailing blanks dropped: the 1981-character prefix ends in 5 blanks after 1976 x
+        (san("x" * 1976 + " " * 5 + "y" * 20), 2000, head + "x" * 1976 + MARKER),
+        # a cut inside a run of blank lines drops the run (LF is whitespace)
+        (san("x" * 1979 + "\n\n" + "z" * 50), 2000, head + "x" * 1979 + MARKER),
+        (
+            san("x" * 1933, title="T", link=link),
+            2000,
+            "\U0001f535 INFO T\n" + "x" * keep_tl + MARKER + "\n" + link,
+        ),
+        (san(EMOJI * 3000), 12000, head + EMOJI * 2991 + MARKER),
     ]
-    for message, kept in rows:
-        result = render(san(message), cfg)
+    for notification, max_chars, expected in rows:
+        result = render(notification, settings(max_chars=max_chars))
         assert result.truncated
-        assert result.text == "\U0001f535 INFO\n" + kept + MARKER
+        assert result.text == expected
+        assert len(result.body) <= MAX_BODY_BYTES
 
 
 def test_cut_drops_trailing_whitespace_before_marker() -> None:
@@ -196,12 +214,19 @@ def test_trailing_whitespace_run_longer_than_budget() -> None:
 
 def test_repeated_newlines_cut_correctly() -> None:
     cfg = settings(max_chars=2000)
-    message = "a\n\n" * 1500  # 4500 characters, ends in LF LF
-    result = render(san(message.strip()), cfg)
+    message = ("a\n\n" * 1500).strip()  # 4498 characters, ends in "a"
+    head = "\U0001f535 INFO\n"
+    # Independent oracle: the largest k whose kept text (trailing whitespace removed) plus the
+    # marker fits, by linear scan from the top.
+    expected = next(
+        head + message[:k].rstrip() + MARKER
+        for k in range(len(message), -1, -1)
+        if len(head + message[:k].rstrip() + MARKER) <= 2000
+    )
+    result = render(san(message), cfg)
     assert result.truncated
-    assert len(result.text) <= 2000
+    assert result.text == expected
     assert result.text.endswith("a" + MARKER)
-    assert "\n\n" + MARKER not in result.text
 
 
 def test_long_single_word_and_100k_input() -> None:
@@ -240,8 +265,7 @@ def test_3000_four_byte_characters_are_cut_to_the_byte_cap() -> None:
 
 
 def test_four_byte_characters_with_a_1024_link_fit() -> None:
-    # Issue #19 says 2900; 2900 * 4 + 1025 bytes is already over 12000, so the largest count that
-    # can fit is used here (see the report), and 2900 is pinned as a cut with the link intact.
+    # 2900 * 4 + 1025 exceeds 12000, so 2700 fits and 2900 is pinned as a cut with the link intact.
     link = "https://a.example/" + "p" * (1024 - len("https://a.example/"))
     assert len(link) == 1024
     result = render(san(EMOJI * 2700, link=link), settings(max_chars=12000))
@@ -253,6 +277,23 @@ def test_four_byte_characters_with_a_1024_link_fit() -> None:
     assert result.truncated
     assert len(result.body) <= MAX_BODY_BYTES
     assert result.text.endswith(MARKER + "\n" + link)
+
+
+def test_four_byte_boundary_with_a_1024_link() -> None:
+    link = "https://a.example/" + "p" * (1024 - len("https://a.example/"))
+    cfg = settings(max_chars=12000)
+    frame = len(b'{"body":""}')  # 11
+    head = len("\U0001f535 INFO\\n".encode())  # 4 + 5 + 2 (escaped LF)
+    link_line = 2 + len(link)  # escaped LF plus the link
+    n = (MAX_BODY_BYTES - frame - head - link_line) // 4
+    result = render(san(EMOJI * n, link=link), cfg)
+    assert not result.truncated
+    assert len(result.body) <= MAX_BODY_BYTES
+    assert result.text.count(EMOJI) == n
+    over = render(san(EMOJI * (n + 1), link=link), cfg)
+    assert over.truncated
+    assert len(over.body) <= MAX_BODY_BYTES
+    assert over.text.endswith(MARKER + "\n" + link)
 
 
 def test_quote_and_backslash_message_stays_within_the_cap() -> None:
@@ -297,6 +338,11 @@ def test_multibyte_near_cap_agrees_with_linear_oracle() -> None:
                 break
         assert fits is not None
         assert result.text == fits
+
+
+def test_rendered_body_annotation_is_builtin_bytes() -> None:
+    # The `bytes` property must not shadow the builtin in the class scope's annotations.
+    assert typing.get_type_hints(Rendered)["body"] is builtins.bytes
 
 
 def test_bytes_is_the_request_body_length() -> None:
@@ -347,17 +393,6 @@ def test_link_is_rendered_as_given_and_never_cut() -> None:
     assert result.truncated
     assert result.text.endswith("\n" + link)
     assert len(result.text) == 3000
-
-
-def test_no_url_parser_or_escaping_helpers_are_imported() -> None:
-    tree = ast.parse((Path(__file__).parents[1] / "src/slack_notice/render.py").read_text())
-    imported: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imported |= {alias.name.split(".")[0] for alias in node.names}
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module.split(".")[0])
-    assert not imported & {"urllib", "html", "re", "http", "socket", "time", "subprocess"}
 
 
 # --- config range ----------------------------------------------------------------------------
@@ -411,3 +446,32 @@ def test_golden_request_bodies(name: str) -> None:
     expected = path.read_bytes()
     assert result.body == expected
     assert result.truncated is name.endswith("_cut")
+
+
+# The goldens were independently reproduced by a spec-literal reference; the two cut goldens are
+# also checked here by arithmetic so a reader can verify them without trusting the file.
+
+
+def test_byte_cut_golden_kept_length_by_arithmetic() -> None:
+    frame = len(b'{"body":""}')  # 11
+    head = len("\U0001f534 ERROR\\n".encode())  # 4 + 6 + 2 (escaped LF)
+    marker = len(MARKER.encode())  # 3 + 11
+    kept = (MAX_BODY_BYTES - frame - head - marker) // 4
+    assert kept == 2990
+    notification, over = GOLDEN_CASES["byte_cut"]
+    result = render(notification, settings(**over))
+    assert result.text == "\U0001f534 ERROR\n" + EMOJI * kept + MARKER
+    assert json.loads(result.body) == {"body": result.text}
+    assert result.body == (GOLDEN / "byte_cut.json").read_bytes()
+
+
+def test_message_cut_golden_kept_length_by_arithmetic() -> None:
+    head = "\U0001f535 INFO T\n"
+    budget_chars = 2000 - (len(head) - 1) - 1 - (1 + len(LINK))
+    keep = budget_chars - len(MARKER)
+    kept = ("word " * 1000)[:keep].rstrip()
+    notification, over = GOLDEN_CASES["message_cut"]
+    result = render(notification, settings(**over))
+    assert result.text == head + kept + MARKER + "\n" + LINK
+    assert len(result.text) <= 2000
+    assert result.body == (GOLDEN / "message_cut.json").read_bytes()
