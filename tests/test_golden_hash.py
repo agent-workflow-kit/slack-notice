@@ -121,10 +121,10 @@ CASES = [
 ]
 
 DEDUPE_KEYS: dict[str, tuple[str, str]] = {
-    "ascii": ("k-1", "7c35c5a1785d2070"),
+    "ascii": ("dedupe-1", "32611fbe419dcd68"),
     "non-ascii": ("cl\u00e9-\u65e5\u672c-\U0001f680", "a8fc0a3628ff488f"),
     "inner LF": ("a\nb", "7e18f737311b2dc3"),  # the key is hashed as given, never sanitized
-    "trailing space": ("k ", "72b24441e5852897"),
+    "trailing space": ("key ", "f7ba81db8e661ff7"),
     "leading dash": ("-lead", "54e05a0bef38bd81"),
     "1024 characters": ("z" * 1024, "1a165b0441c13a4a"),
 }
@@ -240,8 +240,10 @@ def test_the_logged_dedupe_hash_is_the_golden_and_the_key_is_never_logged(
     (record,) = sent.records
     assert record["dedupe_key_sha256"] == expected
     assert sent.document["dedupe_key"] == key  # the output echoes the caller's own key
-    for line in sent.state_files["log.jsonl"].splitlines():
-        assert key.encode() not in line or len(key) < 4  # the log is hash-only
+    escaped = json.dumps(key, ensure_ascii=False)[1:-1].encode()  # as it would be written
+    assert len(escaped) >= 4, "a shorter key could match by chance"
+    for line in sent.state_files["log.jsonl"].split(b"\n")[:-1]:
+        assert escaped not in line and key.encode() not in line  # the log is hash-only
 
 
 def test_a_message_hash_never_equals_the_dedupe_hash_of_the_same_text() -> None:

@@ -39,6 +39,15 @@ def ids(paths: list[Path]) -> list[str]:
     return [str(p.relative_to(GOLDEN)) for p in paths]
 
 
+def lines(data: bytes) -> list[bytes]:
+    """Split on LF only (``splitlines`` also splits on CR, FF, U+2028 and more); a final LF ends
+    the last line, it does not start an empty one."""
+    parts = data.split(b"\n")
+    if parts[-1] == b"":
+        parts.pop()
+    return parts
+
+
 def dump(value: Any, **over: Any) -> str:
     options: dict[str, Any] = {"ensure_ascii": False, "separators": (",", ":")} | over
     return json.dumps(value, **options)
@@ -64,7 +73,7 @@ def test_golden_is_strict_utf8_without_bom_or_cr_or_nul(path: Path) -> None:
 
 @pytest.mark.parametrize("path", ALL, ids=ids(ALL))
 def test_golden_text_is_compact_and_passes_non_ascii_through(path: Path) -> None:
-    for line in path.read_bytes().decode("utf-8").splitlines():
+    for line in (line.decode("utf-8") for line in lines(path.read_bytes())):
         value = json.loads(line)
         assert line == dump(value), f"{path.name}: not ensure_ascii=False with compact separators"
         assert (
@@ -81,7 +90,7 @@ def test_golden_text_is_compact_and_passes_non_ascii_through(path: Path) -> None
 def test_one_json_object_per_line_ending_in_exactly_one_lf(path: Path) -> None:
     data = path.read_bytes()
     assert data.endswith(b"\n") and not data.endswith(b"\n\n")
-    for line in data.splitlines():
+    for line in lines(data):
         assert line == line.rstrip(b" \t"), "no trailing space"
         assert line and isinstance(json.loads(line), dict)
     if path in DOCUMENTS:
@@ -114,7 +123,7 @@ ERROR_ORDER = [
 
 @pytest.mark.parametrize("path", LOGS, ids=ids(LOGS))
 def test_log_lines_have_the_documented_key_order(path: Path) -> None:
-    for line in path.read_bytes().splitlines():
+    for line in lines(path.read_bytes()):
         assert [k for k, _ in pairs(line)] == LOG_ORDER
         assert_valid("log", line)
 
@@ -186,7 +195,7 @@ MUTATIONS: dict[str, Mutation] = {
 
 
 def one_line(path: Path) -> list[bytes]:
-    return path.read_bytes().splitlines()
+    return lines(path.read_bytes())
 
 
 @pytest.mark.parametrize("name", sorted(MUTATIONS))
@@ -212,24 +221,10 @@ def test_ensure_ascii_true_changes_every_golden_that_holds_non_ascii(path: Path)
             assert dump(json.loads(line), ensure_ascii=True).encode() != line
 
 
-@pytest.mark.parametrize("path", LOGS + DOCUMENTS, ids=ids(LOGS + DOCUMENTS))
-def test_line_ending_and_trailing_space_variants_differ_from_the_golden(path: Path) -> None:
-    data = path.read_bytes()
-    for variant in (
-        data.replace(b"\n", b"\r\n"),
-        data + b"\n",
-        data[:-1],
-        data.replace(b"}\n", b"} \n"),
-    ):
-        assert variant != data
-
-
-def test_the_serializers_produce_the_golden_bytes_and_the_mutations_do_not() -> None:
+def test_the_serializers_produce_the_golden_bytes() -> None:
     """The two production serializers against their own golden, for one of each."""
     golden = (GOLDEN / "render" / "escapes.json").read_bytes()
     assert render.serialize("slack_text", '\U0001f535 INFO\nq"uote \\ back\nline') == golden
     line = (GOLDEN / "send" / "sent.log").read_bytes().rstrip(b"\n")
     record = json.loads(line)
     assert log.encode_record(record) == line + b"\n"
-    assert log.encode_record(record) != (dump(record, separators=(", ", ": ")) + "\n").encode()
-    assert log.encode_record(dict(reversed(list(record.items())))) != line + b"\n"

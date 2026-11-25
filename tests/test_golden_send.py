@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -130,7 +131,11 @@ def raising_worker(*, after_writing: bool) -> Callable[[FakeGateway, pytest.Monk
 
 
 def held_send_lock(gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Another process holds send.lock; the log lock is free (as in tests/test_send_runtime.py)."""
+    """Another process holds send.lock; the log lock is free.
+
+    Kept here, not imported: the same few lines exist in tests/test_send_runtime.py as a private
+    helper of that module, and importing one test module from another is worse than the copy.
+    """
     from slack_notice import log
 
     real = log.log_result
@@ -338,22 +343,17 @@ def test_golden_send_outputs(
         compare(SEND_DIR / f"{scenario.name}{suffix}", data)
 
 
-@pytest.mark.parametrize("scenario", SCENARIOS, ids=NAMES)
-def test_golden_send_outputs_match_the_schemas(
-    scenario: Scenario,
-    golden_gateway: GoldenGateway,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.parametrize("name", NAMES)
+def test_golden_send_outputs_match_the_schemas(name: str) -> None:
     """The committed golden bytes (not just a fresh run) are valid against the schemas."""
-    stdout = SEND_DIR / f"{scenario.name}.stdout"
+    stdout = SEND_DIR / f"{name}.stdout"
     if stdout.exists():
         document = json.loads(stdout.read_bytes())
-        name = "cli/error" if "error" in document else "cli/send"
-        assert_valid(name, stdout.read_bytes())
-    log_file = SEND_DIR / f"{scenario.name}.log"
+        schema = "cli/error" if "error" in document else "cli/send"
+        assert_valid(schema, stdout.read_bytes())
+    log_file = SEND_DIR / f"{name}.log"
     if log_file.exists():
-        for line in log_file.read_bytes().splitlines():
+        for line in log_file.read_bytes().split(b"\n")[:-1]:
             assert_valid("log", line)
 
 
@@ -380,33 +380,39 @@ def test_every_golden_file_belongs_to_a_scenario_and_no_scenario_is_empty() -> N
 def error_envelopes() -> list[dict[str, Any]]:
     result = []
     for entry in goldens().values():
-        if b".stdout" in entry or ".stdout" in entry:
+        if ".stdout" in entry:
             document = json.loads(entry[".stdout"])
             if "error" in document:
                 result.append(document["error"])
     return result
 
 
+def interface_exit_table() -> dict[int, set[str]]:
+    """Exit code -> the backticked codes (or reasons) of that row of the Exit codes table."""
+    text = (Path(__file__).resolve().parent.parent / "docs" / "interface.md").read_text("utf-8")
+    section = text.split("## Exit codes", 1)[1].split("### Error envelope", 1)[0]
+    table: dict[int, set[str]] = {}
+    for row in section.splitlines():
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if row.startswith("|") and len(cells) == 3 and cells[0].isdigit():
+            table[int(cells[0])] = set(re.findall(r"`([a-z_]+)`", cells[2]))
+    return table
+
+
 def test_every_exit_code_and_every_error_code_of_the_table_has_a_json_golden() -> None:
+    defs = load_schema("defs")["$defs"]
+    schema_codes = set(defs["error_code"]["enum"])
+    schema_reasons = set(defs["refusal_reason"]["enum"])
+    table = interface_exit_table()
+    assert set(table) == {0, 1, 2, 12, 20, 22}, table
+    # the doc table lists the codes of the exit 1, 2 and 12 rows and the reasons of the 20 row
+    assert table[1] | table[2] | table[12] | {"refused"} == schema_codes
+    assert table[20] == schema_reasons
     codes = {e["code"] for e in error_envelopes()}
-    assert codes == {
-        "usage",
-        "config_invalid",
-        "refused",
-        "credential_invalid",
-        "host_rejected",
-        "auth_required",
-        "wrong_host_response",
-        "rate_limited",
-        "network_error",
-        "unavailable",
-        "upstream_error",
-        "outcome_unknown",
-        "internal",
-    }
+    assert codes == schema_codes
     reasons = {e["reason"] for e in error_envelopes() if e["code"] == "refused"}
-    assert reasons == {"invalid_payload", "empty_message", "link_invalid", "link_scheme"}
-    assert {s.exit for s in SCENARIOS} == {0, 1, 2, 12, 20, 22}
+    assert reasons == schema_reasons
+    assert {s.exit for s in SCENARIOS} == set(table)
     outcomes = {
         json.loads(entry[".stdout"])["outcome"]
         for entry in goldens().values()
@@ -418,7 +424,7 @@ def test_every_exit_code_and_every_error_code_of_the_table_has_a_json_golden() -
 def log_records() -> list[dict[str, Any]]:
     records = []
     for entry in goldens().values():
-        for line in entry.get(".log", b"").splitlines():
+        for line in entry.get(".log", b"").split(b"\n")[:-1]:
             records.append(json.loads(line))
     return records
 
@@ -490,6 +496,27 @@ def test_the_retry_goldens_pin_the_waits() -> None:
     assert cut["retryable"] is True
 
 
+def test_a_429_is_retried_exactly_twice_even_when_a_third_wait_would_fit(
+    golden_gateway: GoldenGateway, tmp_path: Path
+) -> None:
+    """docs/interface.md (Retries): up to two 429 retries, after 2 s and then 4 s; the third 429
+    ends the send with retry_after_s 4 (it has no wait of its own). A 60 s deadline leaves room
+    for a third wait, so only the retry count stops the send; a fourth answer is never asked for."""
+    golden_gateway.allow_unconsumed_script = True
+    sent = run(
+        Scenario("x", 12, stdin=HELLO, config="timeout: 60s\n", attempts=[RATE] * 4 + [OK]),
+        golden_gateway,
+        tmp_path,
+    )
+    assert sent.code == 12
+    assert len(golden_gateway.connections) == 3
+    error = json.loads(sent.out)["error"]
+    assert error["code"] == "rate_limited" and error["retry_after_s"] == 4.0
+    sleeps = [c for c in golden_gateway.events if c.startswith("sleep:")]
+    waits = [float(c.split(":", 1)[1]) for c in sleeps if float(c.split(":", 1)[1]) >= 1.0]
+    assert waits == [2.0, 4.0]
+
+
 # --- no secret, no machine, no clock in any golden --------------------------------------------
 
 
@@ -512,7 +539,7 @@ def test_no_golden_file_holds_a_path_a_home_or_a_real_timestamp(tmp_path: Path) 
         text = path.read_text(encoding="utf-8")
         for needle in ("/home/", "/tmp/", "/storage/", "/Users/", "C:\\", str(tmp_path)):
             assert needle not in text, (path, needle)
-        for line in text.splitlines():
+        for line in text.split("\n"):
             if '"ts":"' in line:
                 ts = json.loads(line)["ts"]
                 assert ts.startswith("2023-11-14T22:1"), (path, ts)  # from the fake clock
