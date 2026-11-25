@@ -23,7 +23,7 @@ import pytest
 from slack_notice import cli
 from slack_notice.cli import Streams, main
 from slack_notice.gateway import SourceRead
-from tests.fake_gateway import FakeGateway
+from tests.fake_gateway import Attempt, FakeGateway, FakeProcessExit
 from tests.harness import assert_valid
 
 CANARY = "CAN" + "ARY-" + "d20c"
@@ -83,7 +83,10 @@ def dry(
     streams = Streams(
         kept_out if out is None else out, kept_err if err is None else err, lambda: False
     )
-    code = main(full, env, gateway, streams)
+    try:
+        code = main(full, env, gateway, streams)
+    except FakeProcessExit as end:  # a real send ends through the gateway's exit
+        code = end.code
     return Result(code, kept_out.getvalue(), kept_err.getvalue(), env)
 
 
@@ -450,13 +453,18 @@ def test_an_invalid_config_beats_disabled(fake_gateway: FakeGateway, tmp_path: P
     assert result.code == 2
 
 
-# --- the non-dry-run path stays a seam --------------------------------------------------------
+# --- the same input without --dry-run is the real send ---------------------------------------
 
 
-def test_a_real_send_is_still_not_implemented(fake_gateway: FakeGateway, tmp_path: Path) -> None:
-    result = dry(["send", "--message", "m"], fake_gateway, config=write_config(tmp_path))
-    assert result.code == 1 and result.stderr == "internal: internal error (NotImplementedError)\n"
-    assert fake_gateway.connections == [] and result.env.accessed == []
+def test_the_same_input_without_dry_run_reads_the_credential_and_the_state(
+    fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    fake_gateway.script(Attempt())
+    config = write_config(tmp_path)
+    result = dry(["send", "--message", "m"], fake_gateway, config=config)  # exits via exit_now
+    assert result.code == 0
+    assert result.env.accessed == ["SLACK_WEBHOOK"] and len(fake_gateway.connections) == 1
+    assert (Path(fake_gateway._home) / ".local").exists()
 
 
 # --- signals during input and in a dry run ----------------------------------------------------

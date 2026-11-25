@@ -381,7 +381,7 @@ def test_global_flags_are_accepted_before_or_after_the_subcommand(
     assert run(argv, fake_gateway).code == 0
     (ctx,) = captured
     for name, value in expected.items():
-        assert getattr(ctx, name) == value
+        assert getattr(ctx if hasattr(ctx, name) else ctx.args, name) == value
 
 
 def test_a_global_flag_before_the_subcommand_is_not_overwritten_by_its_default(
@@ -400,7 +400,7 @@ def test_a_global_flag_before_the_subcommand_is_not_overwritten_by_its_default(
     ]
     assert run(argv, fake_gateway).code == 0
     (ctx,) = captured
-    assert (ctx.json, ctx.dry_run, ctx.verbose, ctx.quiet) == (True, True, True, False)
+    assert (ctx.json, ctx.dry_run, ctx.args.verbose, ctx.args.quiet) == (True, True, True, False)
     assert (ctx.config, ctx.actor, ctx.actor_source) == ("/x/c.yaml", "auto:before", "flag")
 
 
@@ -409,7 +409,7 @@ def test_defaults_when_no_global_flag_is_given(
 ) -> None:
     run(["send"], fake_gateway)
     (ctx,) = captured
-    assert (ctx.json, ctx.dry_run, ctx.verbose, ctx.quiet, ctx.config) == (
+    assert (ctx.json, ctx.dry_run, ctx.args.verbose, ctx.args.quiet, ctx.config) == (
         False,
         False,
         False,
@@ -645,14 +645,13 @@ def test_handler_return_value_is_the_exit_code(
     assert run(["send"], fake_gateway).code == 22
 
 
-def test_unimplemented_commands_are_internal_errors_until_their_issues_land(
+def test_validate_is_an_internal_error_until_its_issue_lands(
     fake_gateway: FakeGateway,
 ) -> None:
-    # TODO(#28) / TODO(#31): remove when send and validate are implemented.
-    for command in ("send", "validate"):
-        result = run([command], fake_gateway)
-        assert result.code == 1
-        assert result.stderr == "internal: internal error (NotImplementedError)\n"
+    # TODO(#31) / TODO(#32): remove when validate is implemented.
+    result = run(["validate"], fake_gateway)
+    assert result.code == 1
+    assert result.stderr == "internal: internal error (NotImplementedError)\n"
 
 
 class CustomError(Exception):
@@ -705,7 +704,7 @@ def test_exit_one_with_json_prints_the_internal_envelope(
 def test_exit_one_after_the_gate_moved_to_writing_says_unknown_outcome(
     monkeypatch: pytest.MonkeyPatch, fake_gateway: FakeGateway
 ) -> None:
-    # TODO(#28): the deadline gate owns this flag; the skeleton only carries it.
+    # The send sets this flag from the deadline's verdict; the skeleton only carries it.
     def handler(ctx: Context) -> int:
         ctx.gate_writing = True
         raise RuntimeError(SECRET)
