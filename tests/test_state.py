@@ -195,7 +195,7 @@ def test_os_errors_creating_the_directory(
     def refuse(*args: object, **kwargs: object) -> None:
         raise OSError(code, os.strerror(code), str(home))  # the filename must not leak
 
-    monkeypatch.setattr(os, "makedirs", refuse)
+    monkeypatch.setattr(os, "mkdir", refuse)
     lines = Lines()
     with StateDir(gw, str(home), lines) as state:
         assert state.open_file("log.lock") is None
@@ -712,3 +712,32 @@ def test_open_file_after_close_is_none_without_warning_or_reopen(
     assert len(os.listdir("/proc/self/fd")) == before
     assert lines.lines == []
     assert gw.events.count("open_state_dir") == opens
+
+
+@pytest.mark.parametrize("umask", [0o277, 0o777])
+def test_open_state_dir_fresh_home_under_restrictive_umask(tmp_path: Path, umask: int) -> None:
+    fresh = tmp_path / "fresh"
+    fresh.mkdir()
+    old = os.umask(umask)
+    try:
+        dir_fd = SystemGateway().open_state_dir(str(fresh))
+    finally:
+        os.umask(old)
+    try:
+        leaf = fresh / ".local" / "state" / "slack-notice"
+        assert stat.S_IMODE(leaf.stat().st_mode) == 0o700
+        for inter in (fresh / ".local", fresh / ".local" / "state"):
+            assert stat.S_IMODE(inter.stat().st_mode) & 0o700 == 0o700
+    finally:
+        os.close(dir_fd)
+
+
+def test_open_state_dir_never_changes_existing_intermediates(tmp_path: Path) -> None:
+    fresh = tmp_path / "pre"
+    (fresh / ".local" / "state").mkdir(parents=True)
+    for part in (fresh / ".local", fresh / ".local" / "state"):
+        part.chmod(0o755)
+    dir_fd = SystemGateway().open_state_dir(str(fresh))
+    os.close(dir_fd)
+    for part in (fresh / ".local", fresh / ".local" / "state"):
+        assert stat.S_IMODE(part.stat().st_mode) == 0o755

@@ -503,8 +503,10 @@ class SystemGateway:
 
         Opened with ``O_DIRECTORY | O_NOFOLLOW`` and checked on the descriptor: owned by the
         user, no permission bits outside 0700 (no group or other access, no setuid, setgid or
-        sticky bit). A directory this call just created is set to 0700 whatever the umask; an
-        existing one is never changed. Anything else is ``StateUnusable``.
+        sticky bit). The leaf this call just created is set to 0700 whatever the umask; an
+        intermediate (``.local``, ``.local/state``) it just created keeps the default-mode
+        bits the umask leaves and gains owner rwx; an existing directory is never changed.
+        Anything else is ``StateUnusable``.
         """
         if not home or not os.path.isabs(home):
             raise StateUnusable("open")
@@ -512,7 +514,19 @@ class SystemGateway:
         leaf = os.path.join(parent, "slack-notice")
         fd = -1
         try:
-            os.makedirs(parent, mode=0o700, exist_ok=True)
+            # One component at a time: makedirs would leave an intermediate we create
+            # unusable under a restrictive umask. Only a directory this call created is
+            # chmodded (the chmod is by path: accepted same-user window, see interface.md).
+            current = home
+            for name in (".local", "state"):
+                current = os.path.join(current, name)
+                try:
+                    os.mkdir(current, 0o777)
+                except FileExistsError:
+                    continue
+                created = stat.S_IMODE(os.lstat(current).st_mode)
+                if created & 0o700 != 0o700:
+                    os.chmod(current, created | 0o700)
             try:
                 os.mkdir(leaf, 0o700)
                 os.chmod(leaf, 0o700)  # our own new dir: a restrictive umask must not lock us out
