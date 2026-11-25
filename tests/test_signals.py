@@ -571,19 +571,66 @@ def test_a_signal_after_the_result_during_the_log_step_changes_nothing(
 
 
 def test_a_signal_noted_before_a_complete_response_does_not_discard_it(
-    gw: FakeGateway, state: Any
+    gw: FakeGateway, state: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The slot is looked at first: a final result that is already there wins over the signal."""
-    sig = signal.SIGTERM
+    """The slot is looked at first: a final result that is already there wins over the signal.
+
+    The order is forced, not slept: the main thread is held inside the signal hook (so it cannot
+    decide) from the moment the signal is noted until the worker has stored its final result.
+    Before, a 20 ms sleep in the worker hoped the main thread would not wake in between; its
+    100 ms slice wake-up could land in that window and (correctly) decide the deadline."""
+    noted = threading.Event()  # the hook ran on the main thread, which is now held in it
+    stored = threading.Event()  # the worker's final result is in the slot
+    note_signal = Deadline.note_signal
+    record = Deadline.record
+
+    def held_note_signal(self: Deadline) -> None:
+        note_signal(self)
+        noted.set()
+        assert stored.wait(SAFETY)  # held: no decision can be made until the result is stored
+
+    def watched_record(self: Deadline, outcome: Outcome, *, final: bool) -> bool:
+        try:
+            return record(self, outcome, final=final)
+        finally:
+            if final:
+                stored.set()
+
+    monkeypatch.setattr(Deadline, "note_signal", held_note_signal)
+    monkeypatch.setattr(Deadline, "record", watched_record)
 
     def work(deadline: Deadline) -> Outcome:
         out = attempt_work(gw, Webhook(PATH), BODY, timeout=5.0)(deadline)
-        kill(sig)  # lands after the worker has its final result, before it is recorded
-        time.sleep(0.02)
+        assert not stored.is_set()
+        kill(signal.SIGTERM)  # the worker has its final result, which is not recorded yet
+        assert noted.wait(SAFETY)  # the signal is noted and the main thread is held
         return out
 
     sent = mimic_send(gw, state, attempts=(Attempt(),), work=work)
+    assert stored.is_set()
     assert sent.code == 0 and sent.printed == ['{"outcome": "sent"}']
+
+
+def test_a_signal_decided_before_the_response_is_recorded_is_the_deadline(
+    gw: FakeGateway, state: Any
+) -> None:
+    """The other side of the race, forced: once the main thread has decided on the signal, a
+    result that is stored after it is dropped (this is why the test above must hold the main
+    thread)."""
+    decided: list[Deadline] = []
+
+    def work(deadline: Deadline) -> Outcome:
+        out = attempt_work(gw, Webhook(PATH), BODY, timeout=5.0)(deadline)
+        decided.append(deadline)
+        kill(signal.SIGTERM)
+        end = time.monotonic() + SAFETY
+        while deadline.decide(expired=False) is None and time.monotonic() < end:
+            time.sleep(0.005)  # bounded wait for the main thread's decision (<= one slice)
+        return out
+
+    sent = mimic_send(gw, state, attempts=(Attempt(),), work=work)
+    assert decided
+    assert sent.code != 0 and sent.printed != ['{"outcome": "sent"}']
 
 
 def test_the_gate_states_are_those_of_the_spec() -> None:

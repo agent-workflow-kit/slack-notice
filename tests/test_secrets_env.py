@@ -17,7 +17,7 @@ import ssl
 import subprocess
 import sys
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -660,6 +660,90 @@ def test_a_real_process_behaves_the_same_with_every_decoy_variable(
     assert not (tmp_path / "x").exists()
 
 
+def sample_cmdlines(
+    read: Callable[[], bytes],
+    running: Callable[[], bool],
+    *,
+    seconds: float = 2.0,
+    interval: float = 0.2,
+) -> list[bytes]:
+    """Read a child's command line until it ends or ``seconds`` pass; the reader is injected so a
+    test can script the samples. An unreadable process ends the sampling."""
+    samples: list[bytes] = []
+    stop = time.monotonic() + seconds
+    while time.monotonic() < stop and running():
+        try:
+            samples.append(read())
+        except OSError:
+            break
+        time.sleep(interval)
+    return samples
+
+
+def check_argv_samples(samples: list[bytes]) -> None:
+    """``/proc/<pid>/cmdline`` reads as empty bytes while the child is still inside exec or once
+    it is exiting (a zombie until it is reaped), so an empty sample says nothing and is ignored.
+    At least one sample must have a command line, and every such sample must start with the
+    interpreter, ``-m`` and the module name. Whether a sample holds the credential is checked by
+    the caller's corpus."""
+    seen = [sample for sample in samples if sample]
+    assert seen, f"no sample of the command line was non-empty ({len(samples)} samples)"
+    for sample in seen:
+        assert sample.split(b"\0")[:3] == [sys.executable.encode(), b"-m", b"slack_notice"]
+
+
+def argv_corpus(samples: list[bytes], corpus: Corpus | None = None) -> Corpus:
+    """A corpus holding every argv sample, empty ones included, as ``argv<index>``."""
+    corpus = Corpus() if corpus is None else corpus
+    for index, sample in enumerate(samples):
+        corpus.add(f"argv{index}", sample)
+    return corpus
+
+
+def test_empty_argv_samples_are_ignored_but_all_empty_samples_fail() -> None:
+    good = b"\0".join([sys.executable.encode(), b"-m", b"slack_notice", b"send"]) + b"\0"
+    check_argv_samples([b"", good, good])  # an empty sample may come before or after real ones
+    check_argv_samples([good, b""])
+    with pytest.raises(AssertionError, match="non-empty"):
+        check_argv_samples([b"", b"", b""])
+    with pytest.raises(AssertionError, match="non-empty"):
+        check_argv_samples([])
+
+
+def test_a_non_empty_argv_sample_that_is_not_ours_fails() -> None:
+    good = b"\0".join([sys.executable.encode(), b"-m", b"slack_notice", b"send"]) + b"\0"
+    other = b"\0".join([sys.executable.encode(), b"-c", b"pass"]) + b"\0"
+    with pytest.raises(AssertionError):
+        check_argv_samples([b"", good, other])
+    with pytest.raises(AssertionError):
+        check_argv_samples([good, b"sh\0-c\0x\0"])
+
+
+def test_the_credential_in_any_argv_sample_is_found_even_after_empty_samples() -> None:
+    leaked = (
+        b"\0".join([sys.executable.encode(), b"-m", b"slack_notice", SECRET.segments[0].encode()])
+        + b"\0"
+    )
+    samples = [b"", leaked]
+    check_argv_samples(samples)  # the prefix is right: the corpus is what finds the credential
+    corpus = argv_corpus(samples)
+    assert set(corpus.blobs) == {"argv0", "argv1"}  # every sample, the empty one too
+    assert corpus.blobs["argv0"] == b""
+    assert corpus.hits(SECRET) != []
+
+
+def test_the_sampler_ends_at_an_unreadable_process_and_keeps_what_it_read() -> None:
+    replies: list[bytes | None] = [b"", b"x\0", None]
+
+    def read() -> bytes:
+        item = replies.pop(0)
+        if item is None:
+            raise ProcessLookupError("gone")
+        return item
+
+    assert sample_cmdlines(read, lambda: True, interval=0.0) == [b"", b"x\0"]
+
+
 def test_a_real_process_with_the_credential_has_it_in_no_argv_stream_or_file(
     tmp_path: Path,
 ) -> None:
@@ -698,13 +782,10 @@ def test_a_real_process_with_the_credential_has_it_in_no_argv_stream_or_file(
     try:
         proc.stdin.write(b'{"message"')  # then silence: the read ends at the deadline
         proc.stdin.flush()
-        stop = time.monotonic() + 2.0
-        while time.monotonic() < stop and proc.poll() is None:
-            try:
-                cmdlines.append(Path(f"/proc/{proc.pid}/cmdline").read_bytes())
-            except OSError:
-                break
-            time.sleep(0.2)
+        cmdlines = sample_cmdlines(
+            lambda: Path(f"/proc/{proc.pid}/cmdline").read_bytes(),
+            lambda: proc.poll() is None,
+        )
         code = proc.wait(timeout=30)
         out, err = proc.stdout.read(), proc.stderr.read()
     finally:
@@ -716,14 +797,10 @@ def test_a_real_process_with_the_credential_has_it_in_no_argv_stream_or_file(
         proc.stderr.close()
     assert code != GUARD_EXIT, "the child tried to reach the network"
     assert code == 12 and b"unavailable" in out
-    assert cmdlines and all(
-        c.split(b"\0")[:3] == [sys.executable.encode(), b"-m", b"slack_notice"] for c in cmdlines
-    )
-    corpus = Corpus()
+    check_argv_samples(cmdlines)
+    corpus = argv_corpus(cmdlines)
     corpus.add("stdout", out)
     corpus.add("stderr", err)
-    for index, cmdline in enumerate(cmdlines):
-        corpus.add(f"argv{index}", cmdline)
     corpus.add("argv", "\0".join(argv))
     corpus.add_tree(home)
     assert corpus.hits(SECRET) == []

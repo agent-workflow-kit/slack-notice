@@ -15,6 +15,7 @@ import io
 import math
 import os
 import re
+import select
 import socket
 import ssl
 import struct
@@ -1411,12 +1412,16 @@ def test_every_gateway_method_is_overridden_by_the_fake() -> None:
 
 
 def real_handshake_error(
-    server_action: Callable[[socket.socket], object], timeout: float = 2.0
+    server_action: Callable[[socket.socket], object],
+    timeout: float = 2.0,
+    peer_gone_first: bool = False,
 ) -> BaseException:
     client, server = socket.socketpair()
     client.settimeout(timeout)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
+    if peer_gone_first:
+        server.close()
     thread = threading.Thread(target=server_action, args=(server,))
     thread.start()
     try:
@@ -1459,11 +1464,29 @@ def test_ssl_wrong_version_matches_a_real_non_tls_answer() -> None:
 
 
 def test_tls_broken_pipe_matches_a_peer_that_is_already_gone() -> None:
-    real = real_handshake_error(lambda server: server.close())
+    # The peer is closed BEFORE the handshake starts, so the ClientHello write always meets a
+    # closed peer (EPIPE). Closing it from a thread raced the client's write: a close after the
+    # write gives ECONNRESET instead (see the next test).
+    real = real_handshake_error(lambda server: None, peer_gone_first=True)
     fake = tls_broken_pipe()
     assert isinstance(real, BrokenPipeError) and type(fake) is BrokenPipeError
     assert fake.errno == real.errno == errno.EPIPE
     assert not is_tls_error(fake)
+
+
+def test_a_peer_that_goes_away_after_the_client_hello_is_a_reset_not_a_broken_pipe() -> None:
+    """The other side of the old flake, forced: the peer closes only once the ClientHello has
+    arrived (it never reads it), so the client sees a reset. ``tls_broken_pipe`` models only a
+    peer that was gone before the write."""
+
+    def peer(server: socket.socket) -> None:
+        select.select([server], [], [], 5)  # readable: the ClientHello was written
+        server.close()
+
+    real = real_handshake_error(peer)
+    assert isinstance(real, ConnectionResetError) and not isinstance(real, BrokenPipeError)
+    # reset-after-unread-ClientHello was checked on Linux only; other OSes may report it differently
+    assert tls_broken_pipe().errno != real.errno
 
 
 def test_handshake_timeout_matches_a_silent_peer() -> None:
