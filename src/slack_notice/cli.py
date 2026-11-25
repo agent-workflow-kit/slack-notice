@@ -1047,24 +1047,56 @@ def _stamp_hook(ctx: Context, locks: list[SendLock]) -> Callable[[], None]:
     return stamp
 
 
-def _send_and_report(
+def _prepare_test_message(
     ctx: Context, settings: dict[str, Any], started: float, progress: _Progress
+) -> tuple[Sanitized, Rendered]:
+    """Steps 3 and 4 of ``validate --test-message``: the fixed notification through the normal
+    validation, sanitizer and render path (no input is read, so nothing can time out here)."""
+    loaded = notification_from_flags(
+        title=TEST_MESSAGE_TITLE, message=TEST_MESSAGE_TEXT, level="info", link=None
+    )
+    progress.level = "info"
+    notification = sanitize_loaded(loaded)
+    progress.level, progress.notification = notification.level, notification
+    ctx.output.phase("input", _elapsed_ms(ctx, started))
+    phase_start = ctx.gateway.monotonic()
+    rendered = render(notification, settings)
+    progress.rendered = rendered
+    ctx.output.phase("render", _elapsed_ms(ctx, phase_start))
+    return notification, rendered
+
+
+def _send_and_report(
+    ctx: Context,
+    settings: dict[str, Any],
+    started: float,
+    progress: _Progress,
+    *,
+    credential: webhook.Webhook | None = None,
 ) -> _Result:
-    """Steps 3 to 6; a ``CliError`` here is a failure that is printed and logged (exit 12, 20)."""
+    """Steps 3 to 6; a ``CliError`` here is a failure that is printed and logged (exit 12, 20).
+
+    ``credential`` is set only by ``validate --test-message``: its credential check already read
+    and validated the variable (once), so step 5 does not read it again and the notification is
+    the fixed test message instead of input."""
     at = started + settings["timeout"]
     locks: list[SendLock] = []
     deadline = Deadline(ctx.gateway, at=at, on_writing=_stamp_hook(ctx, locks))
     ctx.deadline = deadline
-    notification, rendered = _prepare(ctx, settings, started, progress)
+    if credential is None:
+        notification, rendered = _prepare(ctx, settings, started, progress)
+    else:
+        notification, rendered = _prepare_test_message(ctx, settings, started, progress)
     phase_start = ctx.gateway.monotonic()
     # Step 5. From here a signal is the deadline passing (outcome by phase), never an exit.
     ctx.output.arm(deadline.note_signal)
     name: str = settings["webhook_env"]
-    target: webhook.Webhook | None = None
-    try:
-        target = webhook.read_webhook(ctx.env, name)
-    except webhook.CredentialInvalid:
-        pass
+    target: webhook.Webhook | None = credential
+    if target is None:
+        try:
+            target = webhook.read_webhook(ctx.env, name)
+        except webhook.CredentialInvalid:
+            pass
     if target is None:  # raised here, not in the handler: no context is kept
         raise error_from_outcome(webhook.credential_invalid(name))
     # Step 6. The lock is asked for only now (a real send), and a signal while waiting for it is
@@ -1094,18 +1126,28 @@ def _send_and_report(
     return _verdict_result(ctx, verdict.outcome, verdict.error_class, progress, started)
 
 
-def _real_send(ctx: Context, settings: dict[str, Any]) -> int:
+def _real_send(
+    ctx: Context,
+    settings: dict[str, Any],
+    *,
+    credential: webhook.Webhook | None = None,
+    shape: Callable[[Context, _Result], _Result] | None = None,
+) -> int:
     """Steps 3 to 7 of a send that is not a dry run. Never returns: the result is printed, then
     logged, then the process ends through ``gateway.exit_now`` (``conclude``), the one place
     that may end it while a worker can still be blocked. An exit 1 from the worker with the gate
     idle is such a result too (``conclude`` and ``exit_now``). Only an exit 2 (a ``--file``
     problem at step 3) and an exception on the main thread before any possible write are raised
-    to ``_main`` instead: they are not logged and the run ends by returning."""
+    to ``_main`` instead: they are not logged and the run ends by returning.
+
+    ``validate --test-message`` passes ``credential`` (already read) and ``shape``, which turns
+    the send's result into the validate document; the lock, spacing, deadline, retries, signals
+    and log are this same code."""
     started = ctx.gateway.monotonic()  # step 3: the deadline starts here
     progress = _Progress()
     try:
         try:
-            result = _send_and_report(ctx, settings, started, progress)
+            result = _send_and_report(ctx, settings, started, progress, credential=credential)
         except CliError as error:
             if error.exit_code not in (12, 20):
                 raise
@@ -1115,6 +1157,8 @@ def _real_send(ctx: Context, settings: dict[str, Any]) -> int:
                 raise  # before any possible write: exit 1, unknown_outcome false, not logged
             ctx.gate_writing = True
             result = _error_result(ctx, _internal_error(exc, gate_writing=True))
+        if shape is not None:
+            result = shape(ctx, result)
         _conclude(ctx, settings, started, progress, result)
     finally:
         ctx.close_state()
@@ -1136,8 +1180,8 @@ def _conclude(
         if notification is None
         else message_sha256(notification.title_text, notification.message),
         "dedupe_hash": None
-        if notification is None or ctx.args.dedupe_key is None
-        else dedupe_key_sha256(ctx.args.dedupe_key),
+        if notification is None or getattr(ctx.args, "dedupe_key", None) is None
+        else dedupe_key_sha256(ctx.args.dedupe_key),  # validate has no dedupe key
     }
 
     printed = threading.Event()  # set by the print thread once the print and flush are over
@@ -1180,42 +1224,47 @@ CREDENTIAL_OK_MESSAGE = "the webhook credential is set and has the form of a wor
 # The exit code of a failed check (interface: validate): config is 2 but never reaches here (an
 # unloadable config is the error envelope), so only these two checks can fail.
 CHECK_EXIT_CODES = {"credential": 12, "test_message": 12}
+# The fixed notification of `validate --test-message` and the fixed check messages. The failed
+# message names no cause: the exit code is the contract and the log record holds the rest.
+TEST_MESSAGE_TITLE = "slack-notice"
+TEST_MESSAGE_TEXT = "validate: test message"
+TEST_MESSAGE_OK = (
+    "the test message was accepted by Slack; delivery is not observable, "
+    "so look at the destination to confirm it arrived"
+)
+TEST_MESSAGE_FAILED = (
+    "the test message failed; delivery is not observable, "
+    "so look at the destination to see whether it arrived"
+)
 
 
 def _check(name: str, ok: bool, message: str) -> dict[str, Any]:
     return {"name": name, "ok": ok, "message": message}
 
 
-def _credential_check(ctx: Context, settings: dict[str, Any]) -> dict[str, Any]:
-    """Validate the one configured variable against the URL grammar. No network, no state."""
+def _credential_check(
+    ctx: Context, settings: dict[str, Any]
+) -> tuple[dict[str, Any], webhook.Webhook | None]:
+    """Validate the one configured variable against the URL grammar. No network, no state.
+
+    Returns the check and, when it passed, the validated credential (``--test-message`` sends
+    with it, so the variable is read once)."""
     target: webhook.Webhook | None = None
     try:
         target = webhook.read_webhook(ctx.env, settings["webhook_env"])
     except webhook.CredentialInvalid:
         pass
     if target is None:
-        return _check("credential", False, webhook.INVALID_MESSAGE)
-    return _check("credential", True, CREDENTIAL_OK_MESSAGE)
+        return _check("credential", False, webhook.INVALID_MESSAGE), None
+    return _check("credential", True, CREDENTIAL_OK_MESSAGE), target
 
 
-def validate(ctx: Context) -> int:
-    """The `validate` command (interface: validate): config, then credential.
-
-    Plain validate has no deadline, reads no stdin, uses no state directory, writes no log record
-    and opens no connection; ``enabled`` is only reported. A signal before the result print is
-    128+N (the gate is never armed), as in a dry run; ``--dry-run`` has no effect.
-    """
-    if ctx.args.test_message:
-        # TODO(#32): `validate --test-message` (disabled -> exit 22; the test_message check, its
-        # deadline and its log record). Until then it fails as an internal error (exit 1) before
-        # anything is read or sent.
-        raise NotImplementedError
-    settings = load_settings(ctx)  # exit 2 config_invalid ends the run; the credential is unread
-    checks = [_check("config", True, CONFIG_OK_MESSAGE)]
-    checks.append(_credential_check(ctx, settings))  # TODO(#32): test_message follows here
+def _print_checks(ctx: Context, settings: dict[str, Any], checks: list[dict[str, Any]]) -> int:
+    """The validate result: the document (``--json``) or one line per check; the exit code is
+    the failing check's. A failed check is reported here, never as an error envelope."""
     failed = next((c for c in checks if not c["ok"]), None)
     code = 0 if failed is None else CHECK_EXIT_CODES[failed["name"]]
-    ctx.output.result_printed()  # before the print: validate has no step 6
+    ctx.output.result_printed()  # before the print: the print is the last step
     if ctx.json:
         ctx.output.json_document(
             {"ok": failed is None, "enabled": settings["enabled"], "checks": checks}
@@ -1227,6 +1276,55 @@ def validate(ctx: Context) -> int:
         else:  # a failure is an error line: --quiet keeps it
             ctx.output.error_line(f"{entry['name']}: failed ({entry['message']})")
     return code
+
+
+def _test_message_shape(
+    settings: dict[str, Any], passed: list[dict[str, Any]]
+) -> Callable[[Context, _Result], _Result]:
+    """Turn the send's result into the validate result.
+
+    Sent is the ok check; any exit 12 is a failed check that carries nothing of the cause (the
+    log record has it), so a caller treats every non-zero exit as "look at the destination".
+    An internal error (exit 1) is not a failed check: it stays the error envelope.
+    """
+
+    def shape(ctx: Context, result: _Result) -> _Result:
+        if result.code not in (0, 12):
+            return result
+        ok = result.code == 0
+        checks = [
+            *passed,
+            _check("test_message", ok, TEST_MESSAGE_OK if ok else TEST_MESSAGE_FAILED),
+        ]
+
+        def emit() -> None:
+            _print_checks(ctx, settings, checks)
+
+        return _Result(result.code, emit, result.log)
+
+    return shape
+
+
+def validate(ctx: Context) -> int:
+    """The `validate` command (interface: validate): config, credential, then test_message.
+
+    Plain validate has no deadline, reads no stdin, uses no state directory, writes no log record
+    and opens no connection; ``enabled`` is only reported. A signal before the result print is
+    128+N (the gate is never armed), as in a dry run; ``--dry-run`` has no effect.
+
+    ``--test-message`` on a disabled tool is the disabled result (exit 22) before any check, so
+    before the credential is read. Otherwise the checks run in order and a failed one ends the
+    run; the test message is a real send (``_real_send``) that never returns.
+    """
+    settings = load_settings(ctx)  # exit 2 config_invalid ends the run; the credential is unread
+    if ctx.args.test_message and not settings["enabled"]:
+        return _disabled(ctx)
+    checks = [_check("config", True, CONFIG_OK_MESSAGE)]
+    credential, target = _credential_check(ctx, settings)
+    checks.append(credential)
+    if not ctx.args.test_message or target is None:
+        return _print_checks(ctx, settings, checks)
+    return _real_send(ctx, settings, credential=target, shape=_test_message_shape(settings, checks))
 
 
 HANDLERS: dict[str, Callable[[Context], int]] = {
