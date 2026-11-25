@@ -593,6 +593,7 @@ def load_settings(ctx: Context) -> dict[str, Any]:
 
 
 INPUT_FILE_MESSAGE = "--file cannot be read or is not a regular file"
+# todo(#28): use webhook.unavailable("input") so the message is not defined twice
 INPUT_TIMEOUT_MESSAGE = "input did not arrive before the deadline; nothing was sent"
 
 

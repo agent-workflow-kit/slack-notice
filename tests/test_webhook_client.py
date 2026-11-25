@@ -660,7 +660,7 @@ def test_wire_truncated_chunked_body_stays_incomplete_read(reply: bytes) -> None
 
 
 def test_wire_1xx_other_than_100_is_returned_as_its_status() -> None:
-    # TODO(#24): decide the mapping of a 1xx final answer; http.client only skips 100.
+    # http.client only skips 100; the mapping of a final 1xx is in test_response_mapping.py.
     result, _ = wire(b"HTTP/1.1 101 Switching Protocols\r\nContent-Length: 0\r\n\r\n")
     assert result.status == 101 and result.failure is None and result.body == b""
 

@@ -126,6 +126,7 @@ def test_the_link_length_is_not_judged_here() -> None:
         ("a-b_C9", "/a-b_C9"),
         ("x" * 65, "/?"),
         ("x" * 5000, "/?"),
+        ("\x1b" * 5000, "/?"),
         ("", "/?"),
         ("a b", "/?"),
         ("a/b", "/?"),
@@ -538,6 +539,9 @@ def test_a_5000_character_key_gives_the_pointer_question_mark(
     # A number is refused by the parser before any field is looked at (pointer "").
     assert error_of(result)["details"]["pointer"] == ""
     body = json.dumps({"message": "a", "k" * 5000: "v"}).encode()
+    result = run(["send", "--stdin-json"], fake_gateway, monkeypatch, stdin=body)
+    assert error_of(result)["details"]["pointer"] == "/?"
+    body = json.dumps({"message": "a", "\x1b" * 5000: "v"}).encode()
     result = run(["send", "--stdin-json"], fake_gateway, monkeypatch, stdin=body)
     assert error_of(result)["details"]["pointer"] == "/?"
 
