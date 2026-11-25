@@ -50,6 +50,7 @@ from slack_notice.payload import (
     FieldRefused,
     InputRefused,
     InputTimedOut,
+    LinkRefused,
     Sanitized,
     SourceUnusable,
     decode_notification,
@@ -437,7 +438,7 @@ def check_send_combinations(args: argparse.Namespace) -> None:
     --message). The value flags are not judged here: they are checked like the same JSON field
     when the notification is read (``load_notification``, exit 20 with a pointer).
     """
-    text_flags = any(getattr(args, name) is not None for name in TEXT_FLAGS)
+    text_flags = any(vars(args)[name] is not None for name in TEXT_FLAGS)
     if (args.stdin_json or args.file is not None) and text_flags:
         raise usage_error(
             "a JSON source cannot be combined with --title, --message, --level or --link"
@@ -571,8 +572,7 @@ def load_notification(ctx: Context, remaining: float) -> dict[str, Any]:
     and a JSON field have the same rule and the same pointer (exit 20 ``invalid_payload``).
     The error holds a fixed message and the pointer, never an input value.
 
-    ``sanitize_loaded`` (the sanitizer and ``empty_message``) comes after this.
-    TODO(#18): the link rule.
+    ``sanitize_loaded`` (the sanitizer, ``empty_message`` and the link rule) comes after this.
     TODO(#28): the send handler calls this after starting the deadline.
     """
     args = ctx.args
@@ -601,13 +601,18 @@ def load_notification(ctx: Context, remaining: float) -> dict[str, Any]:
 
 def sanitize_loaded(notification: dict[str, Any]) -> Sanitized:
     """Step 3, after validation: the sanitized notification, or exit 20 ``refused`` with reason
-    ``empty_message`` (no pointer; the text is fixed)."""
+    ``empty_message``, ``link_invalid`` or ``link_scheme`` (no details; the text is fixed)."""
     emptied: EmptyMessage | None = None
+    bad_link: LinkRefused | None = None
     result: Sanitized | None = None
     try:
         result = sanitize_notification(notification)
     except EmptyMessage as error:
         emptied = error
+    except LinkRefused as error:
+        bad_link = error
+    if bad_link is not None:  # raised here, not in the handler: no context is kept
+        raise CliError(20, "refused", bad_link.message, reason=bad_link.reason)
     if emptied is not None:  # raised here, not in the handler: no context is kept
         raise CliError(20, "refused", emptied.message, reason="empty_message")
     assert result is not None

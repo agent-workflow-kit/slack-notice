@@ -113,7 +113,8 @@ def test_text_limit_is_100000_code_points(field: str) -> None:
 
 
 def test_the_link_length_is_not_judged_here() -> None:
-    assert payload.validate_notification({"message": "a", "link": "é" * 200_000})  # TODO(#18)
+    # The link rule runs later, in sanitize_notification (check_link).
+    assert payload.validate_notification({"message": "a", "link": "é" * 200_000})
 
 
 @pytest.mark.parametrize(
