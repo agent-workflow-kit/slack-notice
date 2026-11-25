@@ -77,10 +77,10 @@ REFUSED: list[Any] = [
     "0.0",
     "0ms",
     "000",
-    "１０",  # fullwidth digits
-    "١٠",  # arabic-indic digits
-    "10 s",  # no-break space
-    "10​",  # zero-width space
+    "\uff11\uff10",  # fullwidth digits
+    "\u0661\u0660",  # arabic-indic digits
+    "10\u00a0s",  # no-break space
+    "10\u200b",  # zero-width space
     "10\x00",
     "1" * 5000 + "x",
     True,
