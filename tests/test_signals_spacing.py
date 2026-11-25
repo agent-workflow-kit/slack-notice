@@ -8,6 +8,7 @@ exact. The fake clock only moves in a sleep, so "noticed within 100 ms" is measu
 time that elapsed between the stop request and the raise.
 """
 
+# ruff: noqa: F811  (the fixtures are imported from test_spacing and used by name)
 from __future__ import annotations
 
 import os

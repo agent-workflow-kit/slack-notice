@@ -735,8 +735,8 @@ def test_exit_one_survives_a_broken_stderr(
 def test_signal_like_exits_are_not_swallowed_by_the_exit_one_handler(
     exc: BaseException, monkeypatch: pytest.MonkeyPatch, fake_gateway: FakeGateway
 ) -> None:
-    # TODO(#27): handlers for SIGTERM, SIGINT and SIGHUP (128+N, no envelope). Until then a
-    # signal-driven exit must reach the interpreter untouched, with nothing printed.
+    # A signal-driven exit raised from a handler must reach the interpreter untouched, with
+    # nothing printed (the real handlers are in cli._exit_on_signal, tests/test_signals.py).
     monkeypatch.setitem(cli.HANDLERS, "send", raising(exc))
     out, err = io.BytesIO(), io.BytesIO()
     streams = Streams(out=out, err=err, stdin_is_tty=lambda: False)

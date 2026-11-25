@@ -224,7 +224,7 @@ class Output:
 
     def commit(self) -> None:
         """The result print begins: a signal from here on is ignored."""
-        self._gate.committed = True
+        self._gate.commit()
 
     def _write(self, sink: ByteSink, text: str) -> None:
         data = text.encode("utf-8", errors="replace")
@@ -539,14 +539,31 @@ class _SignalGate:
         calls this with ``Deadline.note_signal`` before it takes the lock."""
         self.on_signal = hook
 
+    def commit(self) -> None:
+        """The result print begins: from here on a signal is ignored."""
+        self.committed = True
+
+
+def _set_disposition(number: int, disposition: Any) -> None:
+    """``signal.signal`` that never raises and never prints: CPython refuses with ``OSError``
+    ("ignored due to race condition", also reported as an unraisable error on stderr) when that
+    same signal is pending; nothing may reach stderr after a signal."""
+    previous_hook = sys.unraisablehook
+    sys.unraisablehook = lambda _unraisable: None
+    try:
+        signal.signal(number, disposition)
+    except (OSError, ValueError):
+        pass
+    finally:
+        sys.unraisablehook = previous_hook
+
 
 @contextmanager
 def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
     """SIGTERM, SIGINT and SIGHUP are handled once; the old handlers come back after.
 
-    Before step 5 the first signal ignores the other two (SIG_IGN) and raises ``_Signalled``
-    (a ``BaseException``: no ``except Exception`` swallows it); a signal that was already pending
-    when the dispositions changed finds ``gate.fired`` set and returns, so the first one wins.
+    Before step 5 the first signal raises ``_Signalled`` (a ``BaseException``: no ``except
+    Exception`` swallows it) and sets ``gate.fired``; every later one returns, so the first wins.
     From step 5 on (``gate.arm``) the handler never raises. Once ``gate.committed`` it returns at
     once. Handlers can only be installed from the main thread; elsewhere nothing is installed.
     SIGPIPE is left as the interpreter set it (ignored): a closed pipe is a write error.
@@ -565,8 +582,10 @@ def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
         if gate.fired is not None:
             return
         gate.fired = number
-        for other in SIGNALS:  # handled once: a second signal while unwinding is ignored
-            signal.signal(other, signal.SIG_IGN)
+        # Handled once: from now on this handler returns at the ``gate.fired`` check above, so a
+        # second signal while unwinding is ignored. The dispositions are NOT changed here:
+        # CPython reports a race (an unraisable error on stderr) when a pending signal's
+        # disposition is changed.
         raise _Signalled(number)
 
     saved = {number: signal.signal(number, handler) for number in SIGNALS}
@@ -574,7 +593,7 @@ def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
         yield
     finally:
         for number, previous in saved.items():
-            signal.signal(number, signal.SIG_DFL if previous is None else previous)
+            _set_disposition(number, signal.SIG_DFL if previous is None else previous)
 
 
 # --- dispatch ------------------------------------------------------------------------------------
