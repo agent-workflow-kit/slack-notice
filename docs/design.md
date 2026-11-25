@@ -89,7 +89,8 @@ The sibling notifiers share the contract but differ where the transport differs.
 |---|---|
 | `cli.py` | Argument parsing, command dispatch, exit-code mapping, output. |
 | `config.py` | Config loading, drop-ins, YAML parsing, duration grammar, Pydantic validation (no environment overrides). |
-| `payload.py` | Input reading (byte cap, hardened JSON), notification validation, sanitizer, link rule. |
+| `payload.py` | Input reading (byte cap, hardened JSON), notification validation (including lone surrogates), `empty_message`, link rule. |
+| `sanitizer.py` | The sanitizer table and steps 2 to 5, the emptiness rule; shared by `payload` and `config` (the title rule of `level_prefix`). Imports nothing of the tool. |
 | `render.py` | Body layout and cuts (characters and bytes). |
 | `webhook.py` | URL allowlist, request building, response mapping, retries and the deadline gate. |
 | `spacing.py` | Send lock and fixed 1 s spacing. |

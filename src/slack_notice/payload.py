@@ -14,7 +14,11 @@ Errors are plain exceptions with fixed text; ``cli`` maps them to exit codes and
   and ``notification_from_flags`` forms the same object from the flags, so a flag value and a JSON
   field meet one rule and one pointer.
 
-TODO(#17): implement the sanitizer (including lone surrogates that arrive as JSON escapes).
+- ``sanitize_notification(notification)`` (issue #17) applies the sanitizer (``sanitizer.py``) to
+  a validated notification and refuses an empty message (``EmptyMessage``). Lone surrogates that
+  arrive as JSON escapes are refused by ``validate_notification`` (rule ``surrogate``, with the
+  pointer).
+
 TODO(#18): implement the link rule.
 """
 
@@ -23,9 +27,11 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 from slack_notice.gateway import Gateway, NotRegularFile, SourceRead
+from slack_notice.sanitizer import has_lone_surrogate, is_empty, sanitize_message, sanitize_title
 
 MAX_INPUT_BYTES = 1_048_576
 UTF8_BOM = b"\xef\xbb\xbf"
@@ -162,6 +168,7 @@ FIELD_MESSAGES = {
     "type": "the field must be a string",
     "level": "level must be one of info, warn, action, error",
     "length": f"the field is longer than {MAX_TEXT_CHARS} characters",
+    "surrogate": "the field is not valid Unicode text (it holds a lone surrogate)",
 }
 
 
@@ -191,7 +198,8 @@ def _pointer_name(key: object) -> str:
 def _refusal(value: Mapping[Any, Any]) -> FieldRefused | None:
     """The first broken rule, or None. Looks at each value's type and, for a string, its length;
     never into a value (a list or object is one wrong type however deep), so nesting costs
-    nothing. Order: unknown fields (in input order), then title, message, level, link."""
+    nothing. Order: unknown fields (in input order), then title, message, level, link; within a
+    field type, enum, length, then lone surrogate (a key with one is an unknown name, ``/?``)."""
     for key in value:
         if key not in FIELDS:  # str.__eq__ per known name: a non-string key is just unknown
             return FieldRefused("unknown", "/" + _pointer_name(key))
@@ -205,6 +213,8 @@ def _refusal(value: Mapping[Any, Any]) -> FieldRefused | None:
             return FieldRefused("level", "/level")
         if name in ("title", "message") and len(item) > MAX_TEXT_CHARS:
             return FieldRefused("length", "/" + name)
+        if has_lone_surrogate(item):  # step 1: a JSON escape such as \\ud800 (or an argv byte)
+            return FieldRefused("surrogate", "/" + name)
     return None
 
 
@@ -215,7 +225,7 @@ def validate_notification(value: object) -> dict[str, Any]:
     (an unusable level is refused here, being an enumeration). The raised error has no
     ``__context__``.
 
-    TODO(#17): the absent or empty message (``empty_message``) and the sanitizer.
+    An absent, empty or whitespace-only message passes here: ``sanitize_notification`` refuses it.
     TODO(#18): the link rule (``link_invalid``, ``link_scheme``).
     """
     if not isinstance(value, dict):  # defensive: decode_notification already refuses non-objects
@@ -232,3 +242,57 @@ def notification_from_flags(
     """The object the flags form: only the flags that were given, validated like JSON input."""
     given = {"title": title, "message": message, "level": level, "link": link}
     return validate_notification({name: text for name, text in given.items() if text is not None})
+
+
+# --- sanitizing -------------------------------------------------------------------------------
+
+EMPTY_MESSAGE_TEXT = "the message is empty after sanitizing"
+
+
+class EmptyMessage(Exception):  # noqa: N818
+    """The message is absent, or empty by the sanitizer's definition. Exit 20 ``refused``,
+    reason ``empty_message``, no pointer. The text is fixed and carries no input."""
+
+    @property
+    def message(self) -> str:
+        return EMPTY_MESSAGE_TEXT
+
+
+@dataclass(frozen=True)
+class Sanitized:
+    """A notification after the sanitizer: what rendering, the hashes and the log are built from.
+
+    ``title`` is None when absent or empty after step 5 (see ``title_text`` for the hash input).
+    ``link`` is passed on as given: TODO(#18) the link rule.
+    """
+
+    title: str | None
+    message: str
+    level: str
+    link: str | None
+
+    @property
+    def title_text(self) -> str:
+        return "" if self.title is None else self.title
+
+
+def sanitize_notification(notification: Mapping[str, Any]) -> Sanitized:
+    """Sanitize a validated notification (strings only: ``validate_notification`` ran first).
+
+    Raises ``EmptyMessage`` (no context kept) for an absent message or one that is empty after
+    step 4 by the definition under the sanitizer. The caller reports it after validation.
+    """
+    message = sanitize_message(notification.get("message", ""))
+    raw_title = notification.get("title")
+    title = None if raw_title is None else sanitize_title(raw_title)
+    if title is not None and is_empty(title):
+        title = None
+    empty = is_empty(message)
+    if empty:
+        raise EmptyMessage
+    return Sanitized(
+        title=title,
+        message=message,
+        level=notification.get("level", "info"),
+        link=notification.get("link"),
+    )

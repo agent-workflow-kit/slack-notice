@@ -46,13 +46,16 @@ from slack_notice.config import (
 from slack_notice.gateway import Gateway, SystemGateway
 from slack_notice.log import StateDir
 from slack_notice.payload import (
+    EmptyMessage,
     FieldRefused,
     InputRefused,
     InputTimedOut,
+    Sanitized,
     SourceUnusable,
     decode_notification,
     notification_from_flags,
     read_notification,
+    sanitize_notification,
     validate_notification,
 )
 
@@ -568,7 +571,8 @@ def load_notification(ctx: Context, remaining: float) -> dict[str, Any]:
     and a JSON field have the same rule and the same pointer (exit 20 ``invalid_payload``).
     The error holds a fixed message and the pointer, never an input value.
 
-    TODO(#17), TODO(#18): the sanitizer, ``empty_message`` and the link rule come after this.
+    ``sanitize_loaded`` (the sanitizer and ``empty_message``) comes after this.
+    TODO(#18): the link rule.
     TODO(#28): the send handler calls this after starting the deadline.
     """
     args = ctx.args
@@ -593,6 +597,21 @@ def load_notification(ctx: Context, remaining: float) -> dict[str, Any]:
         )
     assert notification is not None
     return notification
+
+
+def sanitize_loaded(notification: dict[str, Any]) -> Sanitized:
+    """Step 3, after validation: the sanitized notification, or exit 20 ``refused`` with reason
+    ``empty_message`` (no pointer; the text is fixed)."""
+    emptied: EmptyMessage | None = None
+    result: Sanitized | None = None
+    try:
+        result = sanitize_notification(notification)
+    except EmptyMessage as error:
+        emptied = error
+    if emptied is not None:  # raised here, not in the handler: no context is kept
+        raise CliError(20, "refused", emptied.message, reason="empty_message")
+    assert result is not None
+    return result
 
 
 def _not_implemented(_ctx: Context) -> int:

@@ -12,6 +12,7 @@ import pytest
 from slack_notice import cli, config
 from slack_notice.cli import CliError, Context, Streams, main
 from slack_notice.config import ConfigInvalid, config_file_key, validate_config
+from slack_notice.sanitizer import is_removed
 from tests.fake_gateway import FakeGateway
 from tests.harness import schema_errors
 
@@ -739,53 +740,14 @@ INTERFACE_KEPT = [
 @pytest.mark.parametrize("code", INTERFACE_REMOVED)
 def test_every_removed_character_of_the_interface_list_makes_a_prefix_invalid(code: int) -> None:
     assert key_of({"level_prefix": {"info": f"a{chr(code)}b"}}) == "level_prefix"
-    assert config._removed(chr(code))
+    assert is_removed(chr(code))
 
 
 @pytest.mark.parametrize("code", INTERFACE_KEPT)
 def test_every_kept_character_of_the_interface_list_is_accepted_in_visible_text(code: int) -> None:
     text = f"a{chr(code)}b"
     assert validate_config({"level_prefix": {"info": text}})["level_prefix"]["info"] == text
-    assert not config._removed(chr(code))
-
-
-def _expected_removed() -> set[int]:
-    removed: set[int] = set()
-    for low, high in [
-        (0x00, 0x1F), (0x7F, 0x9F), (0xD800, 0xDFFF), (0xE000, 0xF8FF),
-        (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD),
-        (0x00AD, 0x00AD), (0x061C, 0x061C), (0x180E, 0x180E), (0x200B, 0x200B),
-        (0x200E, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F), (0xFEFF, 0xFEFF),
-        (0xFFF9, 0xFFFB), (0xE0000, 0xE007F), (0xE0100, 0xE01EF), (0x115F, 0x1160),
-        (0x3164, 0x3164), (0xFFA0, 0xFFA0), (0x2800, 0x2800), (0x180B, 0x180D), (0x180F, 0x180F),
-        (0xFDD0, 0xFDEF), (0xFFFE, 0xFFFF),
-    ]:  # fmt: skip
-        removed.update(range(low, high + 1))
-    for plane in range(1, 17):
-        removed.update((plane * 0x10000 + 0xFFFE, plane * 0x10000 + 0xFFFF))
-    for low, high in config._UNASSIGNED_15_0:
-        removed.update(range(low, high + 1))
-    removed.discard(0x0A)
-    return removed
-
-
-def test_removed_is_the_interface_table_for_every_code_point() -> None:
-    expected = _expected_removed()
-    actual = {code for code in range(0x110000) if config._removed(chr(code))}
-    assert actual == expected
-
-
-def test_the_pinned_unassigned_table_agrees_with_the_running_python() -> None:
-    import unicodedata
-
-    pinned = {c for low, high in config._UNASSIGNED_15_0 for c in range(low, high + 1)}
-    running = {c for c in range(0x110000) if unicodedata.category(chr(c)) == "Cn"}
-    # A newer Python assigns more characters; it never un-assigns one.
-    assert running <= pinned
-    if unicodedata.unidata_version == "15.0.0":
-        assert running == pinned
-    else:
-        assert {0x31EF, 0x2FFC, 0x2EBF0} <= pinned - running
+    assert not is_removed(chr(code))
 
 
 @pytest.mark.parametrize("code", [0x2FFC, 0x2FFF, 0x31EF, 0x2EBF0, 0x2EE5D])
