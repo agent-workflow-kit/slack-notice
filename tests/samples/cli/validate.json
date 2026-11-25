@@ -1,0 +1,170 @@
+{
+  "valid": {
+    "all_ok": {
+      "ok": true,
+      "enabled": true,
+      "checks": [
+        {
+          "name": "config",
+          "ok": true,
+          "message": "fine"
+        },
+        {
+          "name": "credential",
+          "ok": true,
+          "message": "fine"
+        },
+        {
+          "name": "test_message",
+          "ok": true,
+          "message": "fine"
+        }
+      ]
+    },
+    "config_only": {
+      "ok": true,
+      "enabled": false,
+      "checks": [
+        {
+          "name": "config",
+          "ok": true,
+          "message": "fine"
+        }
+      ]
+    },
+    "credential_failed": {
+      "ok": false,
+      "enabled": true,
+      "checks": [
+        {
+          "name": "config",
+          "ok": true,
+          "message": "fine"
+        },
+        {
+          "name": "credential",
+          "ok": false,
+          "message": "variable is not set"
+        }
+      ]
+    },
+    "disabled": {
+      "outcome": "disabled"
+    }
+  },
+  "invalid": {
+    "empty_object": {
+      "instance": {},
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "ok_true_with_failed_check": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": false,
+            "message": "fine"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "ok_false_with_all_ok": {
+      "instance": {
+        "ok": false,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "unknown_check_name": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "network",
+            "ok": true,
+            "message": "fine"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "check_missing_message": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "check_extra_field": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine",
+            "url": "x"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "enabled_missing": {
+      "instance": {
+        "ok": true,
+        "checks": []
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "extra_field": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [],
+        "x": 1
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "disabled_with_ok": {
+      "instance": {
+        "outcome": "disabled",
+        "ok": true
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "wrong_outcome": {
+      "instance": {
+        "outcome": "sent"
+      },
+      "path": [],
+      "keyword": "oneOf"
+    }
+  }
+}

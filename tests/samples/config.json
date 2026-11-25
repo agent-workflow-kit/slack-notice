@@ -1,0 +1,286 @@
+{
+  "valid": {
+    "empty": {},
+    "defaults": {
+      "enabled": true,
+      "webhook_env": "SLACK_WEBHOOK",
+      "body_variable": "body",
+      "level_prefix": {
+        "info": "🔵 INFO",
+        "warn": "🟠 WARN",
+        "action": "🟡 ACTION",
+        "error": "🔴 ERROR"
+      },
+      "max_chars": 3000,
+      "timeout": "10s",
+      "log": true
+    },
+    "numeric_timeout": {
+      "timeout": 30
+    },
+    "fractional_unit_timeout": {
+      "timeout": "0.5m"
+    },
+    "partial_level_prefix": {
+      "level_prefix": {
+        "warn": "WARN"
+      }
+    },
+    "bounds": {
+      "max_chars": 2000,
+      "webhook_env": "_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "body_variable": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  },
+  "invalid": {
+    "unknown_key": {
+      "instance": {
+        "webhook_url": "x"
+      },
+      "path": [],
+      "keyword": "additionalProperties"
+    },
+    "enabled_string": {
+      "instance": {
+        "enabled": "yes"
+      },
+      "path": [
+        "enabled"
+      ],
+      "keyword": "type"
+    },
+    "log_number": {
+      "instance": {
+        "log": 1
+      },
+      "path": [
+        "log"
+      ],
+      "keyword": "type"
+    },
+    "webhook_env_leading_digit": {
+      "instance": {
+        "webhook_env": "1X"
+      },
+      "path": [
+        "webhook_env"
+      ],
+      "keyword": "pattern"
+    },
+    "webhook_env_trailing_lf": {
+      "instance": {
+        "webhook_env": "SLACK_WEBHOOK\n"
+      },
+      "path": [
+        "webhook_env"
+      ],
+      "keyword": "pattern"
+    },
+    "webhook_env_too_long": {
+      "instance": {
+        "webhook_env": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "path": [
+        "webhook_env"
+      ],
+      "keyword": "pattern"
+    },
+    "webhook_env_a_url": {
+      "instance": {
+        "webhook_env": "https://hooks.example.com/x"
+      },
+      "path": [
+        "webhook_env"
+      ],
+      "keyword": "pattern"
+    },
+    "body_variable_trailing_lf": {
+      "instance": {
+        "body_variable": "body\n"
+      },
+      "path": [
+        "body_variable"
+      ],
+      "keyword": "pattern"
+    },
+    "body_variable_dash": {
+      "instance": {
+        "body_variable": "my-body"
+      },
+      "path": [
+        "body_variable"
+      ],
+      "keyword": "pattern"
+    },
+    "body_variable_too_long": {
+      "instance": {
+        "body_variable": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "path": [
+        "body_variable"
+      ],
+      "keyword": "pattern"
+    },
+    "level_prefix_unknown_level": {
+      "instance": {
+        "level_prefix": {
+          "debug": "D"
+        }
+      },
+      "path": [
+        "level_prefix"
+      ],
+      "keyword": "additionalProperties"
+    },
+    "level_prefix_empty": {
+      "instance": {
+        "level_prefix": {
+          "info": ""
+        }
+      },
+      "path": [
+        "level_prefix",
+        "info"
+      ],
+      "keyword": "pattern"
+    },
+    "level_prefix_trailing_lf": {
+      "instance": {
+        "level_prefix": {
+          "info": "INFO\n"
+        }
+      },
+      "path": [
+        "level_prefix",
+        "info"
+      ],
+      "keyword": "pattern"
+    },
+    "level_prefix_tab": {
+      "instance": {
+        "level_prefix": {
+          "warn": "A\tB"
+        }
+      },
+      "path": [
+        "level_prefix",
+        "warn"
+      ],
+      "keyword": "pattern"
+    },
+    "level_prefix_17_chars": {
+      "instance": {
+        "level_prefix": {
+          "error": "xxxxxxxxxxxxxxxxx"
+        }
+      },
+      "path": [
+        "level_prefix",
+        "error"
+      ],
+      "keyword": "pattern"
+    },
+    "level_prefix_del": {
+      "instance": {
+        "level_prefix": {
+          "action": "a"
+        }
+      },
+      "path": [
+        "level_prefix",
+        "action"
+      ],
+      "keyword": "pattern"
+    },
+    "max_chars_low": {
+      "instance": {
+        "max_chars": 1999
+      },
+      "path": [
+        "max_chars"
+      ],
+      "keyword": "minimum"
+    },
+    "max_chars_high": {
+      "instance": {
+        "max_chars": 12001
+      },
+      "path": [
+        "max_chars"
+      ],
+      "keyword": "maximum"
+    },
+    "max_chars_fraction": {
+      "instance": {
+        "max_chars": 3000.5
+      },
+      "path": [
+        "max_chars"
+      ],
+      "keyword": "type"
+    },
+    "timeout_zero": {
+      "instance": {
+        "timeout": 0
+      },
+      "path": [
+        "timeout"
+      ],
+      "keyword": "exclusiveMinimum"
+    },
+    "timeout_zero_string": {
+      "instance": {
+        "timeout": "0s"
+      },
+      "path": [
+        "timeout"
+      ],
+      "keyword": "pattern"
+    },
+    "timeout_boolean": {
+      "instance": {
+        "timeout": true
+      },
+      "path": [
+        "timeout"
+      ],
+      "keyword": "type"
+    },
+    "timeout_bad_unit": {
+      "instance": {
+        "timeout": "1h"
+      },
+      "path": [
+        "timeout"
+      ],
+      "keyword": "pattern"
+    },
+    "timeout_exponent": {
+      "instance": {
+        "timeout": "1e3"
+      },
+      "path": [
+        "timeout"
+      ],
+      "keyword": "pattern"
+    },
+    "timeout_trailing_lf": {
+      "instance": {
+        "timeout": "10s\n"
+      },
+      "path": [
+        "timeout"
+      ],
+      "keyword": "pattern"
+    },
+    "timeout_negative": {
+      "instance": {
+        "timeout": -1
+      },
+      "path": [
+        "timeout"
+      ],
+      "keyword": "exclusiveMinimum"
+    }
+  }
+}

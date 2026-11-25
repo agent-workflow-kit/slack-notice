@@ -1,0 +1,289 @@
+{
+  "valid": {
+    "sent": {
+      "outcome": "sent",
+      "tool": "slack-notice",
+      "level": "info",
+      "truncated": false,
+      "bytes": 120,
+      "duration_ms": 250,
+      "http_status": 200,
+      "dedupe_key": null
+    },
+    "sent_with_key": {
+      "outcome": "sent",
+      "tool": "slack-notice",
+      "level": "error",
+      "truncated": true,
+      "bytes": 120,
+      "duration_ms": 250,
+      "http_status": 200,
+      "dedupe_key": "build-42"
+    },
+    "dry_run": {
+      "outcome": "dry_run",
+      "tool": "slack-notice",
+      "level": "info",
+      "truncated": false,
+      "bytes": 120,
+      "duration_ms": 250,
+      "http_status": null,
+      "dedupe_key": null,
+      "rendered": "🔵 INFO\nhello"
+    },
+    "dry_run_with_key": {
+      "outcome": "dry_run",
+      "tool": "slack-notice",
+      "level": "info",
+      "truncated": false,
+      "bytes": 120,
+      "duration_ms": 250,
+      "http_status": null,
+      "dedupe_key": "k",
+      "rendered": "🔵 INFO\nhello"
+    },
+    "disabled": {
+      "outcome": "disabled"
+    }
+  },
+  "invalid": {
+    "empty_object": {
+      "instance": {},
+      "path": [],
+      "keyword": "required"
+    },
+    "unknown_outcome": {
+      "instance": {
+        "outcome": "queued"
+      },
+      "path": [
+        "outcome"
+      ],
+      "keyword": "enum"
+    },
+    "extra_field": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 200,
+        "dedupe_key": null,
+        "extra": 1
+      },
+      "path": [],
+      "keyword": "additionalProperties"
+    },
+    "sent_missing_bytes": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "dedupe_key": null
+      },
+      "path": [],
+      "keyword": "required"
+    },
+    "sent_missing_dedupe_key": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 200
+      },
+      "path": [],
+      "keyword": "required"
+    },
+    "sent_with_rendered": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 200,
+        "dedupe_key": null,
+        "rendered": "x"
+      },
+      "path": [],
+      "keyword": "not"
+    },
+    "sent_null_status": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": null,
+        "dedupe_key": null
+      },
+      "path": [
+        "http_status"
+      ],
+      "keyword": "type"
+    },
+    "http_status_out_of_range": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 700,
+        "dedupe_key": null
+      },
+      "path": [
+        "http_status"
+      ],
+      "keyword": "maximum"
+    },
+    "wrong_tool": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "other",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 200,
+        "dedupe_key": null
+      },
+      "path": [
+        "tool"
+      ],
+      "keyword": "const"
+    },
+    "bad_level": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "x",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 200,
+        "dedupe_key": null
+      },
+      "path": [
+        "level"
+      ],
+      "keyword": "enum"
+    },
+    "negative_bytes": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": -1,
+        "duration_ms": 250,
+        "http_status": 200,
+        "dedupe_key": null
+      },
+      "path": [
+        "bytes"
+      ],
+      "keyword": "minimum"
+    },
+    "truncated_string": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": "no",
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 200,
+        "dedupe_key": null
+      },
+      "path": [
+        "truncated"
+      ],
+      "keyword": "type"
+    },
+    "empty_dedupe_key": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 200,
+        "dedupe_key": ""
+      },
+      "path": [
+        "dedupe_key"
+      ],
+      "keyword": "oneOf"
+    },
+    "dry_run_without_rendered": {
+      "instance": {
+        "outcome": "dry_run",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": null,
+        "dedupe_key": null
+      },
+      "path": [],
+      "keyword": "required"
+    },
+    "dry_run_with_status": {
+      "instance": {
+        "outcome": "dry_run",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 200,
+        "dedupe_key": null,
+        "rendered": "🔵 INFO\nhello"
+      },
+      "path": [
+        "http_status"
+      ],
+      "keyword": "type"
+    },
+    "rendered_not_string": {
+      "instance": {
+        "outcome": "dry_run",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": null,
+        "dedupe_key": null,
+        "rendered": 1
+      },
+      "path": [
+        "rendered"
+      ],
+      "keyword": "type"
+    },
+    "disabled_with_fields": {
+      "instance": {
+        "outcome": "disabled",
+        "tool": "slack-notice"
+      },
+      "path": [],
+      "keyword": "maxProperties"
+    }
+  }
+}

@@ -1,0 +1,988 @@
+{
+  "valid": {
+    "sent": {
+      "ts": "2026-11-24T10:00:00.123Z",
+      "tool": "slack-notice",
+      "version": "0.2.0",
+      "outcome": "sent",
+      "exit": 0,
+      "code": null,
+      "reason": null,
+      "level": "info",
+      "bytes": 120,
+      "truncated": false,
+      "duration_ms": 250,
+      "http_status": 200,
+      "message_sha256": "0123456789abcdef",
+      "dedupe_key_sha256": null,
+      "actor": "auto:unknown",
+      "actor_source": "default"
+    },
+    "refused": {
+      "ts": "2026-11-24T10:00:00.123Z",
+      "tool": "slack-notice",
+      "version": "0.2.0",
+      "outcome": "refused",
+      "exit": 20,
+      "code": "refused",
+      "reason": "link_scheme",
+      "level": null,
+      "bytes": null,
+      "truncated": null,
+      "duration_ms": 250,
+      "http_status": null,
+      "message_sha256": null,
+      "dedupe_key_sha256": null,
+      "actor": "auto:unknown",
+      "actor_source": "default"
+    },
+    "failed_rate_limited": {
+      "ts": "2026-11-24T10:00:00.123Z",
+      "tool": "slack-notice",
+      "version": "0.2.0",
+      "outcome": "failed",
+      "exit": 12,
+      "code": "rate_limited",
+      "reason": null,
+      "level": "info",
+      "bytes": 120,
+      "truncated": false,
+      "duration_ms": 250,
+      "http_status": 429,
+      "message_sha256": "0123456789abcdef",
+      "dedupe_key_sha256": null,
+      "actor": "auto:unknown",
+      "actor_source": "default"
+    },
+    "failed_unavailable": {
+      "ts": "2026-11-24T10:00:00.123Z",
+      "tool": "slack-notice",
+      "version": "0.2.0",
+      "outcome": "failed",
+      "exit": 12,
+      "code": "unavailable",
+      "reason": null,
+      "level": "info",
+      "bytes": 120,
+      "truncated": false,
+      "duration_ms": 250,
+      "http_status": null,
+      "message_sha256": "0123456789abcdef",
+      "dedupe_key_sha256": null,
+      "actor": "human:alice",
+      "actor_source": "tty"
+    },
+    "outcome_unknown": {
+      "ts": "2026-11-24T10:00:00.123Z",
+      "tool": "slack-notice",
+      "version": "0.2.0",
+      "outcome": "outcome_unknown",
+      "exit": 12,
+      "code": "outcome_unknown",
+      "reason": null,
+      "level": "info",
+      "bytes": 120,
+      "truncated": false,
+      "duration_ms": 250,
+      "http_status": null,
+      "message_sha256": "0123456789abcdef",
+      "dedupe_key_sha256": "fedcba9876543210",
+      "actor": "auto:unknown",
+      "actor_source": "default"
+    },
+    "outcome_unknown_upstream_error": {
+      "ts": "2026-11-24T10:00:00.123Z",
+      "tool": "slack-notice",
+      "version": "0.2.0",
+      "outcome": "outcome_unknown",
+      "exit": 12,
+      "code": "upstream_error",
+      "reason": null,
+      "level": "info",
+      "bytes": 120,
+      "truncated": false,
+      "duration_ms": 250,
+      "http_status": 502,
+      "message_sha256": "0123456789abcdef",
+      "dedupe_key_sha256": null,
+      "actor": "auto:unknown",
+      "actor_source": "default"
+    },
+    "outcome_unknown_exit_1_internal": {
+      "ts": "2026-11-24T10:00:00.123Z",
+      "tool": "slack-notice",
+      "version": "0.2.0",
+      "outcome": "outcome_unknown",
+      "exit": 1,
+      "code": "internal",
+      "reason": null,
+      "level": "info",
+      "bytes": 120,
+      "truncated": false,
+      "duration_ms": 250,
+      "http_status": null,
+      "message_sha256": "0123456789abcdef",
+      "dedupe_key_sha256": null,
+      "actor": "auto:cron-1",
+      "actor_source": "flag"
+    }
+  },
+  "invalid": {
+    "missing_field": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor_source": "default"
+      },
+      "path": [],
+      "keyword": "required"
+    },
+    "extra_field": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default",
+        "message": "text"
+      },
+      "path": [],
+      "keyword": "additionalProperties"
+    },
+    "wrong_tool": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "ha-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "tool"
+      ],
+      "keyword": "const"
+    },
+    "empty_version": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "version"
+      ],
+      "keyword": "minLength"
+    },
+    "ts_without_millis": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "ts"
+      ],
+      "keyword": "pattern"
+    },
+    "ts_trailing_lf": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z\n",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "ts"
+      ],
+      "keyword": "pattern"
+    },
+    "ts_offset_not_z": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123+00:00",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "ts"
+      ],
+      "keyword": "pattern"
+    },
+    "unknown_outcome": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "delivered",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "outcome"
+      ],
+      "keyword": "enum"
+    },
+    "unknown_exit": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 2,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "exit"
+      ],
+      "keyword": "enum"
+    },
+    "sent_with_nonzero_exit": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 12,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "exit"
+      ],
+      "keyword": "const"
+    },
+    "sent_with_code": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": "internal",
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "code"
+      ],
+      "keyword": "type"
+    },
+    "sent_with_reason": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": "link_invalid",
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "reason"
+      ],
+      "keyword": "type"
+    },
+    "refused_wrong_exit": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "refused",
+        "exit": 12,
+        "code": "refused",
+        "reason": "link_invalid",
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "exit"
+      ],
+      "keyword": "const"
+    },
+    "refused_wrong_code": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "refused",
+        "exit": 20,
+        "code": "internal",
+        "reason": "link_invalid",
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "code"
+      ],
+      "keyword": "const"
+    },
+    "refused_unknown_reason": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "refused",
+        "exit": 20,
+        "code": "refused",
+        "reason": "rude",
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "reason"
+      ],
+      "keyword": "enum"
+    },
+    "failed_with_refused_code": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "failed",
+        "exit": 12,
+        "code": "refused",
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "code"
+      ],
+      "keyword": "enum"
+    },
+    "failed_with_outcome_unknown_code": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "failed",
+        "exit": 12,
+        "code": "outcome_unknown",
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "code"
+      ],
+      "keyword": "enum"
+    },
+    "failed_with_reason": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "failed",
+        "exit": 12,
+        "code": "rate_limited",
+        "reason": "link_invalid",
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "reason"
+      ],
+      "keyword": "type"
+    },
+    "outcome_unknown_exit_1_wrong_code": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "outcome_unknown",
+        "exit": 1,
+        "code": "outcome_unknown",
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "outcome_unknown_exit_20": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "outcome_unknown",
+        "exit": 20,
+        "code": "outcome_unknown",
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [],
+      "keyword": "oneOf"
+    },
+    "exit_1_with_sent": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 1,
+        "code": "internal",
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "outcome"
+      ],
+      "keyword": "const"
+    },
+    "exit_1_with_failed": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "failed",
+        "exit": 1,
+        "code": "internal",
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "outcome"
+      ],
+      "keyword": "const"
+    },
+    "exit_1_other_code": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "outcome_unknown",
+        "exit": 1,
+        "code": "network_error",
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "code"
+      ],
+      "keyword": "const"
+    },
+    "negative_bytes": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": -1,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "bytes"
+      ],
+      "keyword": "minimum"
+    },
+    "negative_duration": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": -1,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "duration_ms"
+      ],
+      "keyword": "minimum"
+    },
+    "duration_null": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": null,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "duration_ms"
+      ],
+      "keyword": "type"
+    },
+    "http_status_600": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 600,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "http_status"
+      ],
+      "keyword": "maximum"
+    },
+    "http_status_99": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 99,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "http_status"
+      ],
+      "keyword": "minimum"
+    },
+    "bad_level": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "debug",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "level"
+      ],
+      "keyword": "enum"
+    },
+    "sha_too_short": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcde",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "message_sha256"
+      ],
+      "keyword": "pattern"
+    },
+    "sha_uppercase": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789ABCDEF",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "message_sha256"
+      ],
+      "keyword": "pattern"
+    },
+    "sha_trailing_lf": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef\n",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "message_sha256"
+      ],
+      "keyword": "pattern"
+    },
+    "dedupe_sha_trailing_lf": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": "0123456789abcdef\n",
+        "actor": "auto:unknown",
+        "actor_source": "default"
+      },
+      "path": [
+        "dedupe_key_sha256"
+      ],
+      "keyword": "pattern"
+    },
+    "actor_no_prefix": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "alice",
+        "actor_source": "default"
+      },
+      "path": [
+        "actor"
+      ],
+      "keyword": "pattern"
+    },
+    "actor_trailing_lf": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "human:alice\n",
+        "actor_source": "default"
+      },
+      "path": [
+        "actor"
+      ],
+      "keyword": "pattern"
+    },
+    "actor_source_unknown": {
+      "instance": {
+        "ts": "2026-11-24T10:00:00.123Z",
+        "tool": "slack-notice",
+        "version": "0.2.0",
+        "outcome": "sent",
+        "exit": 0,
+        "code": null,
+        "reason": null,
+        "level": "info",
+        "bytes": 120,
+        "truncated": false,
+        "duration_ms": 250,
+        "http_status": 200,
+        "message_sha256": "0123456789abcdef",
+        "dedupe_key_sha256": null,
+        "actor": "auto:unknown",
+        "actor_source": "env"
+      },
+      "path": [
+        "actor_source"
+      ],
+      "keyword": "enum"
+    }
+  }
+}
