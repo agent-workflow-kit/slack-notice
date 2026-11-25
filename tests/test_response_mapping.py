@@ -147,6 +147,38 @@ def test_429_asks_for_a_rate_limit_retry_and_never_reads_retry_after() -> None:
     assert map_attempt(attempt(429, OK), gate_writing=True).code == "rate_limited"
 
 
+def test_a_rate_limited_outcome_without_a_wait_has_no_envelope_or_log_fields() -> None:
+    # retry_after_s is a number for rate_limited in both schemas; None would be schema-invalid.
+    o = map_attempt(attempt(429, b""), gate_writing=True)
+    with pytest.raises(ValueError):
+        o.envelope()
+    with pytest.raises(ValueError):
+        o.log_fields()
+    assert o.with_retry_after(2.0).envelope()["error"]["retry_after_s"] == 2.0
+
+
+def test_429_judges_the_status_only_whatever_the_body() -> None:
+    for body, too_long in ((b"", False), (b"x" * 4096, True), (b"not json", False), (OK, False)):
+        o = map_attempt(attempt(429, body, body_too_long=too_long), gate_writing=True)
+        assert o.retry is Retry.RATE_LIMIT and o.code == "rate_limited"
+
+
+def test_a_429_whose_body_read_fails_is_outcome_unknown_and_never_retried() -> None:
+    # No complete HTTP response: the failure is judged before the status.
+    a = AttemptResult(
+        phase=Phase.READ, status=429, failure=webhook._failure(http.client.IncompleteRead(b""))
+    )
+    o = map_attempt(a, gate_writing=True)
+    assert o.code == "outcome_unknown" and o.retry is Retry.NONE
+    check(o)
+
+
+def test_end_to_end_429_with_an_oversized_body_is_a_rate_limit(fake_gateway: FakeGateway) -> None:
+    reply = Reply(status=429, body=b"x" * 5000)
+    o = map_attempt(run(fake_gateway, Attempt(reply=reply)), gate_writing=True)
+    assert o.retry is Retry.RATE_LIMIT
+
+
 def test_only_a_429_has_a_rate_limit_retry() -> None:
     for status in range(100, 600):
         o = map_attempt(attempt(status, b""), gate_writing=True)
@@ -242,6 +274,11 @@ def test_200_with_a_body_over_the_cap_is_a_bad_body_even_if_the_start_is_valid()
     o = map_attempt(attempt(200, body[:4096], body_too_long=True), gate_writing=True)
     assert flags(o) == (12, "wrong_host_response", False, True, {"http_status": 200})
     check(o)
+
+
+def test_numbers_in_other_keys_are_accepted() -> None:
+    o = map_attempt(attempt(200, b'{"ok":true,"x":1}'), gate_writing=True)
+    assert o.exit_code == 0
 
 
 def test_200_with_a_body_exactly_at_the_cap_is_judged_on_its_content() -> None:

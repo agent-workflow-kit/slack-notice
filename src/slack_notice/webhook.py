@@ -333,10 +333,16 @@ class Outcome:
             raise ValueError("retry_after_s must be a finite number of seconds, not negative")
         return replace(self, retry_after_s=float(seconds))
 
+    def _require_wait(self) -> None:
+        # Both schemas hold a number for rate_limited, never null: the loop (#26) must set it.
+        if self.code == "rate_limited" and self.retry_after_s is None:
+            raise ValueError("rate_limited needs retry_after_s (with_retry_after)")
+
     def envelope(self) -> dict[str, Any]:
         """The error envelope (every key present); for exit 12 only."""
         if self.exit_code != 12 or self.code is None:
             raise ValueError("only a failure has an error envelope")
+        self._require_wait()
         return {
             "error": {
                 "code": self.code,
@@ -351,6 +357,7 @@ class Outcome:
 
     def log_fields(self) -> dict[str, Any]:
         """The keyword arguments of ``log.build_record`` that this outcome decides."""
+        self._require_wait()
         return {
             "exit_code": self.exit_code,
             "code": self.code,
