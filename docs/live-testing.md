@@ -4,8 +4,8 @@ The live suite posts marked test messages to your own Slack workflow and records
 
 ## Prerequisites
 
-- A workflow with a webhook trigger and one text variable named `body`, whose message step shows that variable (see the README). Use a workflow whose destination is you: about 40 messages arrive.
-- The trigger URL in a dedicated environment variable, for example `export SLACK_NOTICE_LIVE_WEBHOOK=...` (never on a command line that is logged). Never reuse a production variable such as `SLACK_WEBHOOK`: the suite posts about 34 marked messages plus the failed-run notices below, so point it at a workflow of your own, not one other people read.
+- A workflow with a webhook trigger and one text variable named `body`, whose message step shows that variable (see the README). Use a workflow whose destination is you: 34 messages arrive.
+- The trigger URL in a dedicated environment variable, for example `export SLACK_NOTICE_LIVE_WEBHOOK=...` (never on a command line that is logged). Never reuse a production variable such as `SLACK_WEBHOOK`: the suite delivers 34 marked messages plus the failed-run notices below, so point it at a workflow of your own, not one other people read.
 - A checkout with the dev environment (`uv sync`).
 
 ## Run
@@ -16,9 +16,9 @@ export SLACK_NOTICE_LIVE_REPORT="$HOME/slack-notice-live-report"
 make live
 ```
 
-`SLACK_NOTICE_LIVE_URL_ENV` holds the NAME of the variable that holds the URL, never the URL itself (a value that is not a variable name is refused). The tool under test still reads the URL only from its configured credential variable; the suite hands it the value under `SLACK_WEBHOOK` inside the test process. `SLACK_NOTICE_LIVE_REPORT` is optional: without it the report goes to a new private temporary directory whose path is printed at the end. `make live` is `pytest -m live tests/test_live.py -s -v -x --tb=short`: `-x` stops the whole run at the first failure or Ctrl-C, and `--tb=short` keeps tracebacks free of local variables. Never add `-l`/`--showlocals` or set `PYTEST_ADDOPTS` with it: `http.client` locals hold the secret request path and cannot be redacted.
+`SLACK_NOTICE_LIVE_URL_ENV` holds the NAME of the variable that holds the URL, never the URL itself (a value that is not a variable name is refused). The tool under test still reads the URL only from its configured credential variable; the suite hands it the value under `SLACK_WEBHOOK` inside the test process. `SLACK_NOTICE_LIVE_REPORT` is optional: without it the report goes to a new private temporary directory whose path is printed at the end. `make live` is `pytest -m live tests/test_live.py -s -v --tb=short`: the run goes on after a failure so one broken case does not lose the rest (Ctrl-C still stops it and the report is still written), and `--tb=short` keeps tracebacks free of local variables. Never add `-l`/`--showlocals` or set `PYTEST_ADDOPTS` with it: `http.client` locals hold the secret request path and cannot be redacted.
 
- Without the opt-in variable every live test is skipped.
+Without the opt-in variable every live test is skipped.
 
 The run takes about two minutes. It posts at most one request per 1.5 seconds across the suite, and its burst and sustained tests use the tool's own 1 second send spacing: nothing is looped to stress Slack.
 

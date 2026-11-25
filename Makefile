@@ -25,4 +25,4 @@ mdlint:
 # Set SLACK_NOTICE_LIVE_URL_ENV to the NAME of the variable that holds the trigger URL.
 live:
 	@test -n "$$SLACK_NOTICE_LIVE_URL_ENV" || { echo "set SLACK_NOTICE_LIVE_URL_ENV to the name of the variable holding the trigger URL (docs/live-testing.md)"; exit 2; }
-	uv run pytest -m live tests/test_live.py -s -v -x --tb=short
+	uv run pytest -m live tests/test_live.py -s -v --tb=short

@@ -729,11 +729,12 @@ def test_the_live_target_requires_the_opt_in_variable() -> None:
     assert ls.OPT_IN_VAR in recipe.group(1) and "-m live" in recipe.group(1)
 
 
-def test_the_live_target_stops_at_the_first_failure_and_keeps_locals_out_of_tracebacks() -> None:
+def test_the_live_target_keeps_going_after_a_failure_and_keeps_locals_out_of_tracebacks() -> None:
     recipe = re.search(r"^live:[^\n]*\n((?:\t[^\n]*\n)+)", (ROOT / "Makefile").read_text(), re.M)
     assert recipe is not None
     run = [line for line in recipe.group(1).splitlines() if "pytest" in line][0]
-    assert " -x" in run and "--tb=short" in run
+    assert "--tb=short" in run
+    assert not re.search(r"\s-\w*x\w*\b|--exitfirst|--maxfail", run)
     assert not re.search(r"\s-l\b|--showlocals", run)
 
 
@@ -892,6 +893,18 @@ def test_every_raw_case_survives_a_failing_connection(
     assert len([k for k in observed["R"] if k.startswith("raw_")]) == 5
     assert observed["O1"]["post_2_with_Idempotency-Key"] == {"error": "OSError"}
     assert SEGMENT_A not in session.rec.to_text()
+
+
+def test_failed_raw_requests_are_counted_and_shown_in_the_report(
+    session: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tl, "open_raw_connection", lambda *_a, **_k: ExplodingConnection())
+    session.raw("V3", "a", "GET", session.path)
+    session.raw("V3", "b", "GET", session.path)
+    assert session.rec.raw_failures == 2
+    assert "raw requests failed: 2" in session.rec.to_text()
+    assert session.rec.observations["T"]["raw_requests_failed"] == 2
+    assert "raw requests failed" not in ls.Recorder().to_text()
 
 
 def test_raw_pacing_marks_the_end_of_a_raw_request(

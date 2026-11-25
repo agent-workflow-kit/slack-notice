@@ -144,6 +144,7 @@ class Live:
             raise  # a bug in the suite, not a network event
         except Exception as exc:
             self.rec.observe(item, label, {"error": type(exc).__name__})
+            self.rec.raw_failures += 1
             return None
         finally:
             conn.close()

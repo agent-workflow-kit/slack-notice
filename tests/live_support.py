@@ -653,6 +653,7 @@ class Recorder:
         self.latencies_ms: list[int] = []
         self._secrets: list[str] = []
         self.redactions = 0
+        self.raw_failures = 0
 
     def add_secret(self, value: str) -> None:
         self._register(value)
@@ -702,6 +703,8 @@ class Recorder:
                     "max": ordered[-1],
                 },
             )
+        if self.raw_failures:
+            self.observe("T", "raw_requests_failed", self.raw_failures)
         self.observe("V5", "statuses_seen", {str(k): v for k, v in sorted(self.statuses.items())})
         items: dict[str, Any] = {}
         for item, title in ITEMS.items():
@@ -750,6 +753,9 @@ class Recorder:
                 lines.append(f"    LOOK AT THE DESTINATION: {check['label']}")
                 lines.append(f"        expect: {check['expect']}")
                 lines.append("        result: [ ] as expected   [ ] missing or different")
+            lines.append("")
+        if self.raw_failures:
+            lines.append(f"raw requests failed: {self.raw_failures} (the run is incomplete)")
             lines.append("")
         lines.append("tests:")
         lines += [f"    {name}: {state}" for name, state in data["tests"].items()]
