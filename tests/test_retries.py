@@ -139,6 +139,20 @@ def test_429_three_times_waits_2_then_4_then_rate_limited(run: Callable[..., Run
     assert flags(check(outcome)) == ("rate_limited", True, False, 4.0)
 
 
+def test_the_final_429_leaves_the_gate_idle_and_a_decision_in_the_gap_is_rate_limited(
+    run: Callable[..., Run],
+) -> None:
+    r = run(RATE, RATE, RATE)
+    outcome = r.work()
+    assert r.deadline.state is GateState.IDLE  # stored and idle in one step
+    verdict = r.deadline.decide(expired=True)
+    assert verdict is not None
+    assert verdict.outcome is not None
+    assert flags(check(verdict.outcome)) == ("rate_limited", True, False, 4.0)
+    assert not verdict.unknown_outcome
+    assert outcome.exit_code == 12
+
+
 def test_the_gate_is_idle_again_while_waiting_after_each_429(run: Callable[..., Run]) -> None:
     r = run(RATE, RATE, RATE)
     r.work()
@@ -171,6 +185,27 @@ def test_only_the_status_of_a_429_counts(run: Callable[..., Run], body: bytes) -
     r = run(Attempt(reply=Reply(status=429, body=body)), OK)
     assert r.work().exit_code == 0
     assert r.sleeps == [2.0]
+
+
+RETRY_AFTER_VALUES = [
+    "nan",
+    "-5",
+    "1e999",
+    "Wed, 21 Oct 2026 07:28:00 GMT",
+    "5",
+    "45",
+    "0",
+    "\u00b2",
+]
+
+
+@pytest.mark.parametrize("value", RETRY_AFTER_VALUES)
+def test_a_retry_after_header_of_any_value_is_ignored(run: Callable[..., Run], value: str) -> None:
+    hinted = Attempt(reply=Reply(status=429, body=b"{}", headers=(("Retry-After", value),)))
+    r = run(hinted, hinted, hinted)
+    outcome = r.work()
+    assert r.sleeps == [2.0, 4.0]
+    assert flags(check(outcome)) == ("rate_limited", True, False, 4.0)
 
 
 def test_a_server_wait_hint_cannot_change_the_waits() -> None:
@@ -415,6 +450,38 @@ def test_a_deadline_that_passes_during_the_wait_makes_no_new_attempt(
     outcome = r.work()
     assert (r.connections, r.posts) == (1, 1)  # nothing is opened after the deadline
     assert flags(check(outcome)) == ("rate_limited", True, False, 2.0)
+
+
+def test_a_deadline_during_the_4_s_wait_after_the_second_429_reports_that_wait(
+    run: Callable[..., Run], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = run(RATE, RATE, OK, seconds=30.0, leftover=True)
+    original = r.gw.sleep
+
+    def sleep(seconds: float) -> None:
+        original(seconds + (100.0 if seconds == 4.0 else 0.0))  # the 4 s wait overran
+
+    monkeypatch.setattr(r.gw, "sleep", sleep)
+    outcome = r.work()
+    assert (r.connections, r.posts) == (2, 2)
+    assert flags(check(outcome)) == ("rate_limited", True, False, 4.0)
+
+
+def test_a_tls_failure_after_the_deadline_with_no_earlier_result_is_the_timeout_network_error(
+    run: Callable[..., Run],
+) -> None:
+    # The handshake ran into the deadline and then failed with a TLS class: with no earlier
+    # result the send reports what an idle gate at the deadline reports (Deadline paragraph).
+    slow_eof = Attempt(connect_delay=0.9, tls_delay=0.9, tls_error=ssl_eof_error())
+    r = run(slow_eof, OK, seconds=1.0, leftover=True)
+    error = check(r.work())
+    assert (r.sleeps, r.connections) == ([], 1)
+    assert error["details"] == {"tls": False, "timeout": True}
+    assert (error["code"], error["retryable"], error["unknown_outcome"]) == (
+        "network_error",
+        True,
+        False,
+    )
 
 
 def test_a_signal_during_the_wait_makes_no_new_attempt(

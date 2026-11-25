@@ -174,7 +174,7 @@
             "null"
           ],
           "minimum": 0,
-          "description": "Set only for rate_limited (the wait that was last performed, or the wait that did not fit the deadline; the tool's own backoff, not a server hint), else null."
+          "description": "Set only for rate_limited (the wait that follows the 429 (2 s after the first, 4 s after the second and for the third, which has none; when the deadline cuts that wait or it does not fit, still that wait); the tool's own backoff, not a server hint), else null."
         },
         "unknown_outcome": {
           "type": [

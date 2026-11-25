@@ -314,14 +314,19 @@ def attempt_work(
             )
             outcome = map_attempt(result, gate_writing=entered)
             if outcome.retry is Retry.RATE_LIMIT:
-                if rate_retries >= len(RATE_LIMIT_WAITS):
-                    return outcome.with_retry_after(RATE_LIMIT_WAITS[-1])
-                wait = RATE_LIMIT_WAITS[rate_retries]
+                final_429 = rate_retries >= len(RATE_LIMIT_WAITS)
+                wait = RATE_LIMIT_WAITS[-1 if final_429 else rate_retries]
                 outcome = outcome.with_retry_after(wait)
+                # A fully read 429 is stored and the gate returns to idle in ONE step, whether
+                # or not a retry follows, so a decision in the gap reports it, never unknown.
+                if not deadline.record(outcome, final=False):
+                    return outcome
+                if final_429:
+                    return outcome
                 rate_retries += 1
             elif outcome.retry is Retry.CONNECTION:
-                if deadline.expired and last is not None:
-                    return last
+                if deadline.expired:
+                    return last if last is not None else network_error(tls=False, timeout=True)
                 if connection_retries >= MAX_CONNECTION_RETRIES:
                     return outcome
                 wait = CONNECTION_WAIT
@@ -330,7 +335,7 @@ def attempt_work(
                 return outcome
             if not wait < deadline.remaining():
                 return outcome
-            if not deadline.record(outcome, final=False):
+            if outcome.retry is not Retry.RATE_LIMIT and not deadline.record(outcome, final=False):
                 return outcome
             last = outcome
             gateway.sleep(wait)
