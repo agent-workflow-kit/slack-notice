@@ -224,7 +224,7 @@ class Output:
 
     def commit(self) -> None:
         """The result print begins: a signal from here on is ignored."""
-        self._gate.committed = True
+        self._gate.commit()
 
     def _write(self, sink: ByteSink, text: str) -> None:
         data = text.encode("utf-8", errors="replace")
@@ -521,26 +521,58 @@ class _Signalled(BaseException):  # noqa: N818  (not an Exception: no handler ma
 
 
 class _SignalGate:
-    """Whether the result print has begun: from then on a signal is ignored (interface: Signals)."""
+    """What a signal does now (interface: Signals).
+
+    Three phases, in order: before step 5 the handler raises ``_Signalled`` (exit 128+N); from
+    step 5 (``arm``) it only calls the hook, which is ``Deadline.note_signal`` (lock-free, never
+    raises) and the main thread decides within 100 ms; once the result print has begun
+    (``committed``) it does nothing, so the result is written whole.
+    """
 
     def __init__(self) -> None:
         self.committed = False
-        # TODO(#28): from step 5 the send sets this to ``Deadline.note_signal``: a signal then
-        # means the deadline has passed (the main thread notices within 100 ms), not an exit.
         self.on_signal: Callable[[], None] | None = None
+        self.fired: int | None = None  # the signal that is ending the run before step 5
+
+    def arm(self, hook: Callable[[], None]) -> None:
+        """Step 5 begins: a signal is now the deadline passing, not an exit. TODO(#28): the send
+        calls this with ``Deadline.note_signal`` before it takes the lock."""
+        self.on_signal = hook
+
+    def commit(self) -> None:
+        """The result print begins: from here on a signal is ignored."""
+        self.committed = True
+
+
+def _set_disposition(number: int, disposition: Any) -> None:
+    """``signal.signal`` that never raises ``OSError`` and never prints.
+
+    CPython can report an unraisable error on stderr when the same signal is pending; swapping
+    the unraisable hook narrows that window, it does not close it. Nothing may reach stderr after
+    a signal."""
+    previous_hook = sys.unraisablehook
+    sys.unraisablehook = lambda _unraisable: None
+    try:
+        signal.signal(number, disposition)
+    except (OSError, ValueError):
+        pass
+    finally:
+        sys.unraisablehook = previous_hook
 
 
 @contextmanager
-def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
-    """SIGTERM, SIGINT and SIGHUP raise ``_Signalled`` once; the old handlers come back after.
+def _exit_on_signal(gate: _SignalGate, restore: bool = True) -> Iterator[None]:
+    """SIGTERM, SIGINT and SIGHUP are handled once; the old handlers come back after.
 
-    Once ``gate.committed`` (the result print has begun) the handler returns and the signal is
-    ignored: the result is printed whole and the exit code is the result's. The handlers stay
-    installed until the result is printed and flushed.
-    Handlers can only be installed from the main thread; elsewhere nothing is installed.
-    From step 5 on ``gate.on_signal`` is set (#28) and a signal is the deadline passing, not an
-    exit (``Deadline.note_signal``); the commit point is the start of the printing of the result.
-    TODO(#27): the exit-code side of signals.
+    ``restore=False`` (the process entry) installs a non-raising handler after the block instead:
+    once the gate is committed a signal changes nothing (no traceback, no death by the default
+    disposition); before that it only records ``gate.fired``, which ``main`` turns into 128+N.
+
+    Before step 5 the first signal raises ``_Signalled`` (a ``BaseException``: no ``except
+    Exception`` swallows it) and sets ``gate.fired``; every later one returns, so the first wins.
+    From step 5 on (``gate.arm``) the handler never raises. Once ``gate.committed`` it returns at
+    once. Handlers can only be installed from the main thread; elsewhere nothing is installed.
+    SIGPIPE is left as the interpreter set it (ignored): a closed pipe is a write error.
     """
     if threading.current_thread() is not threading.main_thread():
         yield
@@ -553,16 +585,42 @@ def _exit_on_signal(gate: _SignalGate) -> Iterator[None]:
         if hook is not None:
             hook()  # lock-free (``Deadline.note_signal``); later signals repeat it harmlessly
             return
-        for other in SIGNALS:  # handled once: a second signal while unwinding is ignored
-            signal.signal(other, signal.SIG_IGN)
+        if gate.fired is not None:
+            return
+        gate.fired = number
+        # Handled once: from now on this handler returns at the ``gate.fired`` check above, so a
+        # second signal while unwinding is ignored. The dispositions are NOT changed here:
+        # CPython reports a race (an unraisable error on stderr) when a pending signal's
+        # disposition is changed.
         raise _Signalled(number)
 
-    saved = {number: signal.signal(number, handler) for number in SIGNALS}
+    def record_late(number: int, _frame: object) -> None:
+        # The handler left by ``restore=False``: it never raises, but a signal that comes after
+        # the block and before the result is committed is recorded; ``main`` turns it into
+        # 128+N once the restore loop has finished.
+        if not gate.committed and gate.fired is None:
+            gate.fired = number
+
+    saved: dict[int, Any] = {}
     try:
+        for number in SIGNALS:
+            saved[number] = signal.getsignal(number)  # before the install: a signal mid-install
+            signal.signal(number, handler)  # still finds it in ``saved``
         yield
     finally:
+        # Every signal is restored even when a pending signal raises from a call: the loop
+        # finishes, then the first exception is re-raised.
+        pending: BaseException | None = None
         for number, previous in saved.items():
-            signal.signal(number, previous)
+            target = (
+                record_late if not restore else signal.SIG_DFL if previous is None else previous
+            )
+            try:
+                _set_disposition(number, target)
+            except BaseException as error:
+                pending = pending or error
+        if pending is not None:
+            raise pending
 
 
 # --- dispatch ------------------------------------------------------------------------------------
@@ -876,17 +934,24 @@ def main(
     gateway: Gateway | None = None,
     streams: Streams | None = None,
 ) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
     gateway = SystemGateway() if gateway is None else gateway
     streams = system_streams() if streams is None else streams
     gate = _SignalGate()
+    # The process entry (no argv given: the console script and ``python -m``) leaves a no-op
+    # handler installed after the run, so a signal while the process ends changes nothing;
+    # in-process callers (tests) get the previous handlers back.
+    process_entry = argv is None
+    argv = list(sys.argv[1:] if argv is None else argv)
     try:
         # The handlers stay installed through the printing of the result: a signal before the
         # result print is 128+N with no output, one during or after it is ignored.
-        with _exit_on_signal(gate):
-            return _main(argv, env, gateway, streams, gate)
+        with _exit_on_signal(gate, restore=not process_entry):
+            code = _main(argv, env, gateway, streams, gate)
     except _Signalled as signalled:
         return 128 + signalled.number  # no envelope, no output, no log record
+    if gate.fired is not None and not gate.committed:
+        return 128 + gate.fired  # a _Signalled that cleanup swallowed must not be lost
+    return code
 
 
 def _main(

@@ -155,8 +155,8 @@ def test_the_one_second_boundary(
     if expected_wait is None:
         assert waited == []
     else:
-        assert len(waited) == 1
-        assert waited[0] == pytest.approx(expected_wait, abs=1e-5)
+        assert sum(waited) == pytest.approx(expected_wait, abs=1e-5)  # sliced into <= 0.1 s
+        assert max(waited) <= 0.1 + 1e-9
 
 
 @pytest.mark.parametrize("offset", [0.001, 3600.0, 1e9, 1e12])
@@ -212,7 +212,7 @@ def test_two_senders_creating_the_file_at_once_second_waits_one_second(
         second = acquire(other, gw, FAR)
         assert second is not None
         with second:
-            assert sleeps(gw) == [pytest.approx(1.0)]
+            assert sum(sleeps(gw)) == pytest.approx(1.0)
             second.stamp()
         assert lock_path(home).stat().st_size == 1
 
@@ -227,7 +227,7 @@ def test_the_content_of_the_file_is_never_read(
     os.utime(path, ns=(int((WALL - 0.25) * 1e9), int((WALL - 0.25) * 1e9)))  # the write moved it
     with take(state, gw, FAR) as lock:
         assert lock is not None
-    assert sleeps(gw) == [pytest.approx(0.75, abs=1e-5)]
+    assert sum(sleeps(gw)) == pytest.approx(0.75, abs=1e-5)
     assert "read_at" not in gw.events
 
 
@@ -368,7 +368,8 @@ def test_the_size_and_time_are_read_after_the_lock_is_taken(
     gw.try_lock = try_lock  # type: ignore[method-assign]
     with take(state, gw, FAR) as lock:
         assert lock is not None
-    assert sleeps(gw) == [POLL_S, pytest.approx(0.75, abs=1e-5)]
+    assert sleeps(gw)[0] == POLL_S
+    assert sum(sleeps(gw)[1:]) == pytest.approx(0.75, abs=1e-5)
 
 
 def test_a_failed_set_mtime_leaves_the_write_time_and_the_next_send_waits_a_second(
@@ -383,7 +384,7 @@ def test_a_failed_set_mtime_leaves_the_write_time_and_the_next_send_waits_a_seco
     os.utime(lock_path(home), ns=(nanos, nanos))  # as the write: ~now
     with take(state, gw, FAR) as second:
         assert second is not None
-    assert sleeps(gw) == [pytest.approx(0.997, abs=1e-5)]
+    assert sum(sleeps(gw)) == pytest.approx(0.997, abs=1e-5)
     assert warned.lines == [STATE_WARNING]
 
 
@@ -408,7 +409,7 @@ def test_the_spacing_wait_that_ends_before_the_deadline_proceeds(
     make_lock_file(home, size=1, mtime=WALL - 0.2)
     with take(state, gw, gw.monotonic() + 5) as lock:
         assert lock is not None
-    assert sleeps(gw) == [pytest.approx(0.8, abs=1e-5)]
+    assert sum(sleeps(gw)) == pytest.approx(0.8, abs=1e-5)
 
 
 # --- release on every path and descriptor hygiene -------------------------------------------

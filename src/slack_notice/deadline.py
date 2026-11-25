@@ -21,8 +21,8 @@ frames nor chunk trailer lines, and a trickling peer resets per-operation timeou
 never joined, its socket is not touched by the main thread, and the process ends through
 ``gateway.exit_now`` (``os._exit``) after the result is printed, flushed and logged.
 
-What this module does not do (owners in the TODOs): the signal handler and exit
-codes beyond ``Verdict.exit_code`` (#27), and the ``send`` flow that prints and logs (#28). The
+What this module does not do (owners in the TODOs): the signal handler lives in
+``cli._exit_on_signal`` (#27, done); the ``send`` flow that prints and logs is #28. The
 lock wait and the input read are outside the gate: they happen in the main thread before the
 worker starts and end the send with ``unavailable`` there.
 
