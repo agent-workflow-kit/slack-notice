@@ -1,9 +1,10 @@
 """Config, drop-ins, YAML and durations.
 
 TODO(#9): implement the home lookup from the password database.
-TODO(#10): implement config loading (a DurationError becomes exit 2 config_invalid, details.key
-the error's `key`; the caller maps it).
-TODO(#11): implement config validation.
+TODO(#10): implement config loading.
+TODO(#11): implement config validation: validate `timeout` with `check_duration`; a DurationError
+becomes exit 2 config_invalid, details.key its `key`; build the message from key and rule only
+(Pydantic wraps ValueError and keeps the input in its error dict).
 """
 
 from __future__ import annotations

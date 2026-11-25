@@ -7,6 +7,8 @@ two cannot drift apart.
 from __future__ import annotations
 
 import math
+import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -124,22 +126,29 @@ def test_a_boolean_is_never_a_number() -> None:
 
 
 def test_huge_digit_strings_are_refused_not_crashed() -> None:
-    # float() of 5000 digits is inf; the range check must still be false, never an exception.
+    # 5000-character strings are refused by the 256-character cap before any numeric conversion.
     for value in ("9" * 5000, "9" * 5000 + "m", "9" * 5000 + "ms", "0." + "0" * 5000 + "1"):
         with pytest.raises(DurationError):
             check_duration("timeout", value)
 
 
-def test_a_huge_integer_count_of_digits_is_not_a_float_overflow_crash() -> None:
-    with pytest.raises(DurationError):
-        check_duration("timeout", 10**5000)
+def test_numbers_that_overflow_float_are_refused_not_crashed() -> None:
+    # 10**5000 does not fit a float (OverflowError) and 1e308 * 10 is inf; both must be a
+    # DurationError, never a raw exception.
+    for value in (10**5000, 1e308 * 10):
+        with pytest.raises(DurationError):
+            check_duration("timeout", value)
 
 
 # Per-key range: interface.md gives timeout 3s to 120s.
 
 
 def test_ranges_come_from_the_interface() -> None:
-    assert DURATION_RANGES == {"timeout": (3, 120)}
+    interface = (Path(__file__).resolve().parent.parent / "docs" / "interface.md").read_text()
+    row = next(line for line in interface.splitlines() if line.startswith("| `timeout` |"))
+    match = re.search(r"(\d+)s to (\d+)s", row)
+    assert match, row
+    assert DURATION_RANGES == {"timeout": (int(match[1]), int(match[2]))}
 
 
 @pytest.mark.parametrize(
