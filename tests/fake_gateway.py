@@ -509,6 +509,12 @@ class FakeGateway(SystemGateway):
         self.state_file_errors: dict[str, BaseException] = {}
         self.lock_held = False
         self.lock_error: BaseException | None = None
+        # log-file hooks: an error raised by write_fd / rename_state_file, and a cap on the bytes
+        # one write_fd call really writes (a short write, as on a nearly full disk)
+        self.write_error: BaseException | None = None
+        self.write_limit: int | None = None
+        self.rename_errors: dict[str, BaseException] = {}  # keyed by the source name
+        self.truncate_error: BaseException | None = None
         # config files: an error raised for a path (as given to the gateway) instead of reading
         self.file_errors: dict[str, BaseException] = {}
         self.directory_errors: dict[str, BaseException] = {}
@@ -683,6 +689,36 @@ class FakeGateway(SystemGateway):
     def unlock(self, fd: int) -> None:
         self._record("unlock")
         super().unlock(fd)
+
+    def file_size(self, fd: int) -> int:
+        self._record("file_size")
+        return super().file_size(fd)
+
+    def read_at(self, fd: int, count: int, offset: int) -> bytes:
+        self._record("read_at")
+        return super().read_at(fd, count, offset)
+
+    def write_fd(self, fd: int, data: bytes) -> int:
+        self._record("write_fd")
+        self._advance(self.state_delay)
+        if self.write_error is not None:
+            raise self.write_error
+        if self.write_limit is not None:
+            data = data[: self.write_limit]
+        return super().write_fd(fd, data)
+
+    def truncate_fd(self, fd: int, size: int) -> None:
+        self._record("truncate_fd")
+        if self.truncate_error is not None:
+            raise self.truncate_error
+        super().truncate_fd(fd, size)
+
+    def rename_state_file(self, dir_fd: int, source: str, target: str) -> None:
+        self._record(f"rename:{source}>{target}")
+        error = self.rename_errors.get(source)
+        if error is not None:
+            raise error
+        super().rename_state_file(dir_fd, source, target)
 
     def read_regular_file(self, path: str | os.PathLike[str], max_bytes: int) -> bytes:
         self._record("read_regular_file")

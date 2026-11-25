@@ -1647,3 +1647,35 @@ def test_no_environment_variable_exists_only_for_tests() -> None:
         if isinstance(n, ast.Attribute) and n.attr in {"environ", "getenv", "putenv"}
     ]
     assert len(gateway_reads) == 1
+
+
+# --- log file hooks (issue #14) ------------------------------------------------------------
+
+
+def test_write_hooks_raise_cap_and_record(tmp_path: Path) -> None:
+    home = tmp_path / "h"
+    home.mkdir(mode=0o700)
+    gw = FakeGateway(home=str(home))
+    dir_fd = gw.open_state_dir(str(home))
+    fd = gw.open_state_file(dir_fd, "log.jsonl", append=True)
+    try:
+        gw.write_limit = 2
+        assert gw.write_fd(fd, b"abcdef") == 2
+        assert gw.read_at(fd, 10, 0) == b"ab"
+        gw.truncate_fd(fd, 0)
+        gw.write_limit = None
+        gw.write_error = OSError(28, "no space")
+        with pytest.raises(OSError):
+            gw.write_fd(fd, b"x")
+        gw.truncate_error = OSError(30, "read-only")
+        with pytest.raises(OSError):
+            gw.truncate_fd(fd, 0)
+        gw.rename_errors["log.jsonl"] = OSError(30, "read-only")
+        with pytest.raises(OSError):
+            gw.rename_state_file(dir_fd, "log.jsonl", "log.jsonl.1")
+        assert gw.file_size(fd) == 0
+    finally:
+        gw.close_fd(fd)
+        gw.close_fd(dir_fd)
+    assert {"write_fd", "truncate_fd", "read_at", "file_size"} <= set(gw.events)
+    assert "rename:log.jsonl>log.jsonl.1" in gw.events

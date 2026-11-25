@@ -211,6 +211,29 @@ class Gateway(Protocol):
 
     def unlock(self, fd: int) -> None: ...
 
+    def file_size(self, fd: int) -> int:
+        """Size in bytes of the open file (``fstat``); ``OSError`` on failure."""
+        ...
+
+    def read_at(self, fd: int, count: int, offset: int) -> bytes:
+        """Up to ``count`` bytes at ``offset`` (``pread``: the file position is untouched)."""
+        ...
+
+    def write_fd(self, fd: int, data: bytes) -> int:
+        """One ``write`` call; the number of bytes written (it may be short). ``OSError``
+        (``ENOSPC``, ``EROFS``, ``EDQUOT``, ...) on failure."""
+        ...
+
+    def truncate_fd(self, fd: int, size: int) -> None:
+        """``ftruncate`` the open file to ``size`` bytes."""
+        ...
+
+    def rename_state_file(self, dir_fd: int, source: str, target: str) -> None:
+        """Rename ``source`` to ``target`` (plain names) inside the state directory, replacing
+        ``target`` atomically. ``FileNotFoundError`` when ``source`` is missing; a link in
+        either place is renamed or replaced, never followed."""
+        ...
+
     def read_regular_file(self, path: str | os.PathLike[str], max_bytes: int) -> bytes: ...
 
     def list_directory(self, path: str) -> list[str]:
@@ -635,6 +658,24 @@ class SystemGateway:
 
     def unlock(self, fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
+
+    def file_size(self, fd: int) -> int:
+        return os.fstat(fd).st_size
+
+    def read_at(self, fd: int, count: int, offset: int) -> bytes:
+        return os.pread(fd, count, offset)
+
+    def write_fd(self, fd: int, data: bytes) -> int:
+        return os.write(fd, data)
+
+    def truncate_fd(self, fd: int, size: int) -> None:
+        os.ftruncate(fd, size)
+
+    def rename_state_file(self, dir_fd: int, source: str, target: str) -> None:
+        for name in (source, target):
+            if not name or "/" in name or name in (".", "..") or "\0" in name:
+                raise ValueError("state file name must be one plain path component")
+        os.rename(source, target, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
 
     def read_regular_file(self, path: str | os.PathLike[str], max_bytes: int) -> bytes:
         """Read a config-style file: opened ``O_NONBLOCK``, symlinks followed, the descriptor
