@@ -45,6 +45,7 @@ from slack_notice.config import (
 )
 from slack_notice.gateway import Gateway, SystemGateway
 from slack_notice.log import StateDir
+from slack_notice.payload import InputRefused, InputTimedOut, SourceUnusable, read_notification
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
 ERROR_EXIT_CODES = frozenset({1, 2, 12, 20})
@@ -408,8 +409,16 @@ def parse(argv: Sequence[str]) -> argparse.Namespace:
         raise usage_error("--actor must be human:<name> or auto:<name>")
     # An empty --config path is a missing file (config_invalid, details.key --config): config
     # loading decides it (load_settings), not the parser.
-    # TODO(#16): flag combinations of send and the checks of the flag values.
+    # TODO(#16): the other flag combinations of send and the checks of the flag values.
     return args
+
+
+def check_stdin_source(args: argparse.Namespace, streams: Streams) -> None:
+    """Step 1: a JSON source on stdin (--stdin-json, --file -) is refused on a terminal."""
+    if args.command != "send":
+        return
+    if (args.stdin_json or args.file == "-") and streams.stdin_is_tty():
+        raise usage_error("--stdin-json and --file - need stdin to be a pipe or a file")
 
 
 # --- dispatch ------------------------------------------------------------------------------------
@@ -441,6 +450,47 @@ def load_settings(ctx: Context) -> dict[str, Any]:
         )
     # TODO(#16): overlay the flag values (resolve_settings) once the flags are checked.
     return settings
+
+
+INPUT_FILE_MESSAGE = "--file cannot be read or is not a regular file"
+INPUT_TIMEOUT_MESSAGE = "input did not arrive before the deadline; nothing was sent"
+
+
+def read_input(ctx: Context, remaining: float) -> dict[str, Any]:
+    """Step 3, the reading half: one JSON source to a decoded object, or a CliError.
+
+    The source is the file named by ``--file`` or, otherwise, stdin (``--file -`` included).
+    ``remaining`` is the seconds left of the deadline, which starts at step 3. The caller
+    never sees input text in an error.
+
+    TODO(#16): validate the fields and the flag source (the flag-only form reads no JSON).
+    TODO(#28): the send handler calls this, starts the deadline and logs ``failed`` for the
+    timeout error (a log record for exit 12 ``unavailable``, phase ``input``).
+    TODO(#27): a signal during this call must exit 128+N; the handler has to raise or exit.
+    """
+    file_arg: str | None = ctx.args.file
+    source: int | str = 0 if file_arg is None or file_arg == "-" else file_arg
+    try:
+        return read_notification(ctx.gateway, source, remaining)
+    except InputRefused as refused:
+        raise CliError(
+            20,
+            "refused",
+            refused.message,
+            reason="invalid_payload",
+            details={"pointer": refused.pointer},
+        ) from None
+    except InputTimedOut:
+        raise CliError(
+            12,
+            "unavailable",
+            INPUT_TIMEOUT_MESSAGE,
+            details={"phase": "input"},
+            retryable=True,
+            unknown_outcome=False,
+        ) from None
+    except SourceUnusable:
+        raise usage_error(INPUT_FILE_MESSAGE) from None
 
 
 def _not_implemented(_ctx: Context) -> int:
@@ -493,6 +543,7 @@ def _run(
     holder: list[Context],
 ) -> int:
     args = parse(argv)
+    check_stdin_source(args, streams)
     home = _lookup_home(args, gateway)
     actor, actor_source = resolve_actor(args.actor, tty=streams.stdin_is_tty(), gateway=gateway)
     ctx = Context(
