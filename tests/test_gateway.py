@@ -254,6 +254,82 @@ def test_only_the_gateway_references_network_clock_lock_or_process_modules() -> 
     assert {name: found for name, found in offenders.items() if found} == {}
 
 
+FS_OS_NAMES = frozenset({"stat", "lstat", "open", "scandir", "listdir", "access", "readlink"})
+FS_PATH_NAMES = frozenset({"isdir", "isfile", "exists", "lexists", "islink", "getsize"})
+
+
+def filesystem_references(source: str) -> list[str]:
+    """Direct filesystem probes (``os.path.isdir``, ``os.stat``, ``os.open``, ...), by attribute
+    on ``os`` or ``os.path`` (tracked through ``import os`` / ``import os.path`` and aliases)
+    and by ``from os import x`` / ``from os.path import x``. Pure string helpers such as
+    ``os.path.join`` are not flagged. All file access belongs to the gateway."""
+    tree = ast.parse(source)
+    os_aliases = {
+        (a.asname or a.name.split(".")[0])
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for a in node.names
+        if a.name in ("os", "os.path") and (a.asname or a.name == "os" or a.name == "os.path")
+    }
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.level == 0:
+            if node.module == "os":
+                found += [f"os.{a.name}" for a in node.names if a.name in FS_OS_NAMES]
+            elif node.module == "os.path":
+                found += [f"os.path.{a.name}" for a in node.names if a.name in FS_PATH_NAMES]
+        elif isinstance(node, ast.Attribute):
+            base = node.value
+            if isinstance(base, ast.Name) and base.id in os_aliases and node.attr in FS_OS_NAMES:
+                found.append(f"os.{node.attr}")
+            elif (
+                isinstance(base, ast.Attribute)
+                and base.attr == "path"
+                and isinstance(base.value, ast.Name)
+                and base.value.id in os_aliases
+                and node.attr in FS_PATH_NAMES
+            ):
+                found.append(f"os.path.{node.attr}")
+    return found
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os\nos.path.isdir('x')",
+        "import os as o\no.path.exists('x')",
+        "import os\nos.stat('x')",
+        "import os\nos.open('x', 0)",
+        "from os import stat",
+        "from os.path import isfile",
+    ],
+)
+def test_filesystem_checker_detects_probes(source: str) -> None:
+    assert filesystem_references(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import os\nos.path.join('a', 'b')",
+        "import os\nos.path.isabs('/x')",
+        "class A:\n    def f(self):\n        return self.stat",
+        "def f(g):\n    return g.is_directory('x')",
+    ],
+)
+def test_filesystem_checker_accepts_other_references(source: str) -> None:
+    assert filesystem_references(source) == []
+
+
+def test_only_the_gateway_probes_the_filesystem() -> None:
+    offenders = {
+        str(path.relative_to(SRC)): filesystem_references(path.read_text())
+        for path in sorted(SRC.rglob("*.py"))
+        if path.name != "gateway.py"
+    }
+    assert {name: found for name, found in offenders.items() if found} == {}
+
+
 ENV_MAPPING_NAMES = frozenset({"env", "environ", "environment"})
 ENV_READ_METHODS = frozenset({"get", "pop", "setdefault"})
 
@@ -419,6 +495,36 @@ def test_home_dir_lookup_failure_is_a_fixed_error(
     assert info.value.__cause__ is None
     assert info.value.__suppress_context__
     assert gateway.login_name() is None
+
+
+@pytest.mark.parametrize("exc", [RuntimeError("boom /secret"), TypeError("x"), OverflowError("y")])
+def test_home_dir_any_lookup_exception_is_the_fixed_error(
+    gateway: Gateway, monkeypatch: pytest.MonkeyPatch, exc: Exception
+) -> None:
+    def broken(_uid: int) -> None:
+        raise exc
+
+    monkeypatch.setattr("pwd.getpwuid", broken)
+    with pytest.raises(HomeLookupError) as info:
+        gateway.home_dir()
+    assert "secret" not in str(info.value)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
+
+
+def test_is_directory(gateway: Gateway, tmp_path: Path) -> None:
+    (tmp_path / "dir").mkdir()
+    (tmp_path / "file").write_text("x")
+    (tmp_path / "dangling").symlink_to(tmp_path / "nowhere")
+    (tmp_path / "linkdir").symlink_to(tmp_path / "dir")
+    assert gateway.is_directory(str(tmp_path / "dir"))
+    assert gateway.is_directory(str(tmp_path / "linkdir"))
+    assert not gateway.is_directory(str(tmp_path / "file"))
+    assert not gateway.is_directory(str(tmp_path / "missing"))
+    assert not gateway.is_directory(str(tmp_path / "dangling"))
+    assert not gateway.is_directory(f"{tmp_path}\x00/dir")
+    assert not gateway.is_directory(str(tmp_path) + "/" + "a" * 100_000)
+    assert not gateway.is_directory("/tmp\ud800")
 
 
 def test_uid_and_login_name(gateway: Gateway) -> None:

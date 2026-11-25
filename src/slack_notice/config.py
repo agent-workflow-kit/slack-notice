@@ -1,6 +1,7 @@
 """Config, drop-ins, YAML and durations, and the home lookup.
 
-TODO(#10): implement config loading.
+TODO(#10): implement config loading. Report a file path in details.key so it can never equal the
+reserved sentinel values `home` and `--config` (for example as an absolute path).
 TODO(#11): implement config validation: validate `timeout` with `check_duration`; a DurationError
 becomes exit 2 config_invalid, details.key its `key`; build the message from key and rule only
 (Pydantic wraps ValueError and keeps the input in its error dict).
@@ -9,7 +10,6 @@ becomes exit 2 config_invalid, details.key its `key`; build the message from key
 from __future__ import annotations
 
 import math
-import os
 import re
 from fractions import Fraction
 from typing import TYPE_CHECKING, Any
@@ -121,14 +121,10 @@ def resolve_home(gateway: Gateway) -> str:
         home = gateway.home_dir()
     except HomeLookupError:
         raise HomeUnusable from None
-    # Not `os.path.isdir` alone: it hides every OSError, which is what we want, but a str with a
-    # NUL or surrogates must also be refused without raising anything else.
-    if not isinstance(home, str) or not home or not os.path.isabs(home) or "\x00" in home:
+    # The absolute check is textual (no filesystem access here); a str with a NUL or surrogates
+    # is refused without raising, and the directory test is the gateway's.
+    if not isinstance(home, str) or not home or not home.startswith("/") or "\x00" in home:
         raise HomeUnusable
-    try:
-        is_directory = os.path.isdir(home)
-    except (OSError, ValueError):
-        is_directory = False
-    if not is_directory:
+    if not gateway.is_directory(home):
         raise HomeUnusable
     return home

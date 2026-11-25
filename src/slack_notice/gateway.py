@@ -1,7 +1,8 @@
 """Gateway: the single boundary between slack-notice and the outside world.
 
 Every other module reaches the network, the clock (``monotonic``, ``wall_time``, ``sleep``),
-name resolution, the password database (``home_dir``, ``uid``, ``login_name``), input sources
+name resolution, the password database (``home_dir``, ``uid``, ``login_name``), the home
+directory check (``is_directory``), input sources
 (``read_source``), CA files, config-style files (``read_regular_file``) and state files
 (``open_state_dir``, ``open_state_file``, ``try_lock``, ``unlock``) through the ``Gateway``
 protocol defined here, so tests can pass a fake (issue #5). A test (``tests/test_gateway.py``)
@@ -162,7 +163,15 @@ class Gateway(Protocol):
     def home_dir(self) -> str:
         """``pw_dir`` of the current uid from the password database (never ``HOME``).
 
-        Returned as found; the config module rejects empty, relative or missing directories.
+        Returned as found; the config module rejects empty or relative paths and asks
+        ``is_directory`` about the rest.
+        """
+        ...
+
+    def is_directory(self, path: str) -> bool:
+        """True when ``path`` is an existing directory (a link to one counts).
+
+        Any ``OSError`` or ``ValueError`` (a NUL, a path that is too long) is ``False``.
         """
         ...
 
@@ -372,8 +381,15 @@ class SystemGateway:
     def home_dir(self) -> str:
         try:
             return pwd.getpwuid(self.uid()).pw_dir
-        except (KeyError, OSError):
+        except Exception:
+            # Any failure, not only a missing entry: the cause may quote the uid or a path.
             raise HomeLookupError from None
+
+    def is_directory(self, path: str) -> bool:
+        try:
+            return os.path.isdir(path)
+        except (OSError, ValueError):
+            return False
 
     def uid(self) -> int:
         return os.getuid()

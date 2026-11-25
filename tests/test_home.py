@@ -21,8 +21,19 @@ from tests.fake_gateway import FakeGateway
 FIXED_LINE = "config_invalid: configuration is invalid\n"
 
 
-def gateway_with(home: str, **kwargs: object) -> FakeGateway:
-    return FakeGateway(home=home, **kwargs)  # type: ignore[arg-type]
+def gateway_with(
+    home: str,
+    *,
+    home_error: bool = False,
+    login_name: str | None = "tester",
+    home_is_directory: bool | None = None,
+) -> FakeGateway:
+    return FakeGateway(
+        home=home,
+        home_error=home_error,
+        login_name=login_name,
+        home_is_directory=home_is_directory,
+    )
 
 
 # --- resolve_home -------------------------------------------------------------------------
@@ -53,7 +64,7 @@ def test_a_non_utf8_directory_name_is_accepted_when_it_exists(tmp_path: Path) ->
 
 @pytest.mark.parametrize(
     "home",
-    ["", " ", "relative", ".", "..", "./x", "~", "~/x", "$HOME", "a\x00b", "\x00"],
+    ["", " ", "relative", ".", "..", "./x", "~", "~/x", "$HOME", "a\x00b", "\x00", "/tmp\ud800"],
 )
 def test_empty_relative_and_odd_values_are_refused(home: str) -> None:
     with pytest.raises(HomeUnusable):
@@ -89,6 +100,18 @@ def test_a_very_long_path_is_refused_not_crashed(tmp_path: Path) -> None:
         resolve_home(gateway_with(str(tmp_path) + "/" + "a" * 100_000))
 
 
+def test_the_directory_check_goes_through_the_gateway() -> None:
+    # "/nonexistent-dir" is not a directory on disk; only the gateway's answer can accept it.
+    assert resolve_home(gateway_with("/nonexistent-dir", home_is_directory=True)) == (
+        "/nonexistent-dir"
+    )
+
+
+def test_a_gateway_that_says_not_a_directory_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(HomeUnusable):
+        resolve_home(gateway_with(str(tmp_path), home_is_directory=False))
+
+
 def test_a_failed_lookup_is_refused() -> None:
     with pytest.raises(HomeUnusable):
         resolve_home(gateway_with("/", home_error=True))
@@ -109,12 +132,6 @@ def test_a_failed_lookup_hides_its_context() -> None:
         resolve_home(gateway_with("/", home_error=True))
     assert info.value.__cause__ is None
     assert info.value.__suppress_context__
-
-
-def test_an_unknown_uid_entry_is_refused(tmp_path: Path) -> None:
-    # The real gateway turns a KeyError for the uid into HomeLookupError; the fake scripts it.
-    with pytest.raises(HomeUnusable):
-        resolve_home(gateway_with(str(tmp_path), home_error=True))
 
 
 def test_the_environment_is_not_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,7 +208,7 @@ def test_home_and_xdg_in_env_and_process_are_ignored(
 
 @pytest.mark.parametrize(
     "bad",
-    ["", "relative/dir", "a\x00b", "MISSING", "FILE"],
+    ["", "relative/LEAKMARK", "/tmp/LEAKMARK\x00b", "MISSING", "FILE"],
 )
 @pytest.mark.parametrize("command", ["send", "validate"])
 def test_an_unusable_home_is_config_invalid_with_key_home(
@@ -206,7 +223,11 @@ def test_an_unusable_home_is_config_invalid_with_key_home(
     assert error["code"] == "config_invalid"
     assert error["details"] == {"key": "home"}
     assert error["message"] == "configuration is invalid"
-    assert home not in out + err or home == ""
+    # A NUL is escaped in JSON, so check a marker substring and the parsed fields as well.
+    assert "LEAKMARK" not in out + err
+    assert "MISSING" not in out + err
+    assert "FILE" not in out + err
+    assert home not in json.dumps(json.loads(out)) or home == ""
     assert seen == []
 
 
@@ -226,6 +247,7 @@ def test_nothing_is_read_or_sent_when_the_home_is_unusable(tmp_path: Path) -> No
     assert main(["send", "--stdin-json"], {}, gateway, streams) == 2
     assert gateway.connections == []
     assert gateway.events == []
+    assert gateway.source_reads == 0
 
 
 def test_dry_run_with_config_needs_no_home(seen: list[Context], tmp_path: Path) -> None:
