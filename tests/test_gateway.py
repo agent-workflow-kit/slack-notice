@@ -262,9 +262,15 @@ def test_gateway_has_no_subprocess_or_dynamic_imports() -> None:
     assert not hasattr(gw_module, "run")
 
 
-def test_gateway_never_touches_the_environment() -> None:
+def test_gateway_never_touches_the_environment_except_to_hand_it_to_the_cli() -> None:
     found = banned_references((SRC / "gateway.py").read_text())
-    assert [name for name in found if name.startswith("os.")] == []
+    # Exactly one reference: `environ()` returns a copy; nothing in the gateway consults it.
+    assert [name for name in found if name.startswith("os.")] == ["os.environ"]
+    assert dict(gateway_environ_copy()) == dict(os.environ)
+
+
+def gateway_environ_copy() -> dict[str, str]:
+    return SystemGateway().environ()
 
 
 def test_gateway_matches_the_protocol(gateway: Gateway) -> None:
