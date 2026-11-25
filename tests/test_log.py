@@ -12,6 +12,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -323,11 +324,141 @@ def test_exit_one_without_the_writing_gate_and_gate_with_other_exits() -> None:
         sent(message_hash="NOT-A-HASH"),
         sent(http_status=None),
         sent(http_status=204),
+        sent(exit_code=12, code="upstream_error", unknown_outcome=True, http_status=None),
+        sent(exit_code=12, code="upstream_error", unknown_outcome=True, http_status=200),
+        sent(exit_code=12, code="upstream_error", unknown_outcome=True, http_status=499),
+        sent(exit_code=12, code="upstream_error", unknown_outcome=True, http_status=99999),
+        sent(exit_code=12, code="wrong_host_response", http_status=None),
+        sent(exit_code=12, code="wrong_host_response", http_status=204),
+        sent(exit_code=12, code="wrong_host_response", http_status=99999),
+        sent(exit_code=12, code="wrong_host_response", unknown_outcome=True, http_status=302),
+        sent(exit_code=0.0),
+        sent(exit_code=True),
+        sent(exit_code=20.0, code="refused", reason="link_scheme"),
+        sent(duration_ms=1.5),
+        sent(duration_ms=True),
+        sent(duration_ms=None),
+        sent(duration_ms="9"),
     ],
 )
 def test_malformed_calls_are_refused_not_written(fields: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         build_record(wall_time=1.0, **fields)
+
+
+def test_every_code_and_status_gives_a_valid_record_or_a_refusal() -> None:
+    codes = [None, *load_schema("defs")["$defs"]["error_code"]["enum"], "bogus"]
+    statuses = [None, 0, 99, 100, 199, 200, 204, 299, 300, 302, 429, 499, 500, 503, 599, 600]
+    built_any = False
+    for exit_code in (0, 1, 12, 20):
+        for code in codes:
+            for unknown in (False, True):
+                for status in statuses:
+                    fields = sent(
+                        exit_code=exit_code,
+                        code=code,
+                        reason="link_scheme" if exit_code == 20 else None,
+                        unknown_outcome=unknown,
+                        gate_writing=True,
+                        http_status=status,
+                    )
+                    try:
+                        built = build_record(wall_time=1.0, **fields)
+                    except ValueError:
+                        continue
+                    if built is not None:
+                        built_any = True
+                        assert_valid("log", encode_record(built))
+    assert built_any
+
+
+def test_outcome_unknown_code_never_carries_a_status() -> None:
+    built = record(exit_code=12, code="outcome_unknown", unknown_outcome=True, http_status=200)
+    assert built["http_status"] is None
+    assert_valid("log", encode_record(built))
+
+
+def test_duration_and_bytes_are_clamped() -> None:
+    limit = 2**53 - 1
+    assert record(duration_ms=-5)["duration_ms"] == 0
+    assert record(duration_ms=10**30)["duration_ms"] == limit
+    assert record(bytes_=10**30)["bytes"] == limit
+    assert record(bytes_=-1)["bytes"] == 0
+    assert record(duration_ms=limit)["duration_ms"] == limit
+
+
+@pytest.mark.parametrize("bad", [1.5, True, "9", None])
+def test_a_non_integer_duration_is_refused(bad: Any) -> None:
+    with pytest.raises(ValueError):
+        build_record(wall_time=1.0, **sent(duration_ms=bad))
+
+
+def _pad_to(length: int) -> dict[str, Any]:
+    base = record()
+    base["version"] = ""
+    pad = length - len(encode_record(base))
+    base["version"] = "x" * pad
+    assert len(encode_record(base)) == length
+    return base
+
+
+def test_the_one_kib_boundary_is_exact() -> None:
+    assert len(encode_record(_pad_to(MAX_WRITE - 1))) == 1022
+    with pytest.raises(ValueError):
+        encode_record(_pad_to(MAX_WRITE))
+
+
+def test_log_result_survives_bugs_in_the_call(
+    gw: FakeGateway, state: StateDir, warned: Lines, home: Path
+) -> None:
+    missing = sent()
+    del missing["version"]
+    assert log_result(state, gw, enabled=True, **missing) is False
+    assert warned.lines == [STATE_WARNING]
+    assert log_result(state, gw, enabled=True, **sent(actor=None)) is False
+    assert warned.lines == [STATE_WARNING]
+    assert not (leaf(home) / LOG_NAME).exists()
+
+
+def test_log_result_survives_an_unexpected_error_from_the_append(
+    gw: FakeGateway, state: StateDir, warned: Lines, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_args: Any, **_kwargs: Any) -> bool:
+        raise RuntimeError("injected")
+
+    monkeypatch.setattr("slack_notice.log.append_record", boom)
+    assert log_result(state, gw, enabled=True, **sent()) is False
+    assert warned.lines == [STATE_WARNING]
+    assert not (leaf(home) / LOG_NAME).exists()
+
+
+def test_enums_and_patterns_match_the_schemas() -> None:
+    from slack_notice import log as mod
+
+    defs = load_schema("defs")["$defs"]
+    schema = load_schema("log")
+    assert mod._LEVELS == tuple(defs["level"]["enum"])
+    assert mod._REFUSAL_REASONS == tuple(defs["refusal_reason"]["enum"])
+    for name, ours in (("sha256_16", mod._SHA16), ("actor", mod._ACTOR)):
+        theirs = re.compile(defs[name]["pattern"])
+        samples = ("0123456789abcdef", "0123456789abcdeF", "human:a", "auto:é", "root", "auto:x\n")
+        for text in samples:
+            assert bool(ours.match(text)) == bool(theirs.search(text)), (name, text)
+    all_of = schema["allOf"]
+    failed = next(r for r in all_of if r["if"]["properties"]["outcome"].get("const") == "failed")
+    assert mod._FAILED_CODES == tuple(failed["then"]["properties"]["code"]["enum"])
+    unknown = next(
+        r
+        for r in all_of
+        if r["if"]["properties"]["outcome"].get("const") == "outcome_unknown"
+        and "oneOf" in r["then"]
+    )
+    assert mod._UNKNOWN_CODES == tuple(unknown["then"]["oneOf"][0]["properties"]["code"]["enum"])
+    no_response = next(
+        r for r in all_of if r["if"]["properties"].get("code", {}).get("enum") is not None
+    )
+    assert mod._NO_RESPONSE_CODES == tuple(no_response["if"]["properties"]["code"]["enum"])
+    assert set(schema["properties"]["actor_source"]["enum"]) == {"flag", "tty", "default"}
 
 
 def test_a_malformed_call_warns_once_and_writes_nothing(
@@ -384,7 +515,6 @@ def test_http_status_is_dropped_where_no_response_arrived() -> None:
         {"bytes_": "12"},
         {"bytes_": True},
         {"duration_ms": -1},
-        {"duration_ms": "9"},
         {"http_status": 99999},
         {"http_status": "200"},
         {"truncated": "yes"},

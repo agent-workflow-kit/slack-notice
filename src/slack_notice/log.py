@@ -155,10 +155,13 @@ def format_ts(wall_time: float) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 
+_MAX_COUNT = 2**53 - 1  # the largest integer every JSON reader keeps exactly
+
+
 def _count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
-    return max(value, 0)
+    return min(max(value, 0), _MAX_COUNT)
 
 
 def build_record(
@@ -188,6 +191,10 @@ def build_record(
     exit 22, 128+N and anything else. Every value is allow-listed here (enums, fixed-shape
     hashes, integers), so text from the caller's input cannot reach the file.
     """
+    if type(exit_code) is not int:
+        raise ValueError("exit_code must be an integer")
+    if type(duration_ms) is not int:
+        raise ValueError("duration_ms must be an integer")
     if exit_code == 0:
         outcome, code, reason = "sent", None, None
     elif exit_code == 20:
@@ -206,11 +213,19 @@ def build_record(
         outcome, code, reason = "outcome_unknown", "internal", None
     else:
         return None
-    if code in _NO_RESPONSE_CODES or outcome == "refused":
+    if code in _NO_RESPONSE_CODES + ("outcome_unknown",) or outcome == "refused":
         http_status = None
     status = _count(http_status)
     if status is not None and not 100 <= status <= 599:
         status = None
+    if code == "upstream_error" and (status is None or status < 500):
+        raise ValueError("upstream_error needs a status of 500 to 599")
+    if code == "wrong_host_response":
+        is_2xx = status is not None and 200 <= status <= 299
+        if outcome == "failed" and (status is None or is_2xx):
+            raise ValueError("a failed wrong_host_response needs a non-2xx status")
+        if outcome == "outcome_unknown" and status is not None and not is_2xx:
+            raise ValueError("an unknown wrong_host_response has no status or a 2xx one")
     if level not in _LEVELS:
         level = None
     if not isinstance(message_hash, str) or not _SHA16.match(message_hash):
@@ -232,7 +247,7 @@ def build_record(
         "level": level,
         "bytes": _count(bytes_),
         "truncated": truncated if isinstance(truncated, bool) else None,
-        "duration_ms": _count(duration_ms) or 0,
+        "duration_ms": _count(duration_ms),
         "http_status": status,
         "message_sha256": message_hash,
         "dedupe_key_sha256": dedupe_hash,
@@ -349,9 +364,13 @@ def log_result(state: StateDir | None, gateway: Gateway, *, enabled: bool, **fie
         return False
     try:
         record = build_record(wall_time=gateway.wall_time(), **fields)
-    except (ValueError, TypeError):
+    except Exception:  # a caller bug: warn, skip, never change the exit code
         state.warn()
         return False
     if record is None:
         return False
-    return append_record(state, gateway, record)
+    try:
+        return append_record(state, gateway, record)
+    except Exception:
+        state.warn()
+        return False
