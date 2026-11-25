@@ -667,6 +667,10 @@ class FakeGateway(SystemGateway):
             raise error
         return super().open_state_file(dir_fd, name, append=append)
 
+    def close_fd(self, fd: int) -> None:
+        self._record("close_fd")
+        super().close_fd(fd)
+
     def try_lock(self, fd: int) -> bool:
         self._record("try_lock")
         self._advance(self.state_delay)

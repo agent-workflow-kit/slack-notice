@@ -202,6 +202,11 @@ class Gateway(Protocol):
 
     def open_state_file(self, dir_fd: int, name: str, *, append: bool = False) -> int: ...
 
+    def close_fd(self, fd: int) -> None:
+        """Close a descriptor returned by ``open_state_dir`` or ``open_state_file``; an
+        ``OSError`` (already closed) is ignored."""
+        ...
+
     def try_lock(self, fd: int) -> bool: ...
 
     def unlock(self, fd: int) -> None: ...
@@ -497,49 +502,126 @@ class SystemGateway:
         """Create (mode 0700) and open ``<home>/.local/state/slack-notice``; return its fd.
 
         Opened with ``O_DIRECTORY | O_NOFOLLOW`` and checked on the descriptor: owned by the
-        user, no group or other permission bits. Anything else is ``StateUnusable``.
+        user, no permission bits outside 0700 (no group or other access, no setuid, setgid or
+        sticky bit). The leaf this call just created is set to 0700 whatever the umask; an
+        intermediate (``.local``, ``.local/state``) it just created keeps the default-mode
+        bits the umask leaves and gains owner rwx; an existing directory is never changed.
+        Anything else is ``StateUnusable``.
         """
         if not home or not os.path.isabs(home):
             raise StateUnusable("open")
         parent = os.path.join(home, ".local", "state")
         leaf = os.path.join(parent, "slack-notice")
+        fd = -1
         try:
-            os.makedirs(parent, mode=0o700, exist_ok=True)
+            # One component at a time: makedirs would leave an intermediate we create
+            # unusable under a restrictive umask. Only a directory this call created is
+            # chmodded (the chmod is by path: accepted same-user window, see interface.md).
+            current = home
+            for name in (".local", "state"):
+                current = os.path.join(current, name)
+                try:
+                    os.mkdir(current, 0o777)
+                except FileExistsError:
+                    continue
+                created = stat.S_IMODE(os.lstat(current).st_mode)
+                if created & 0o700 != 0o700:
+                    os.chmod(current, created | 0o700)
             try:
                 os.mkdir(leaf, 0o700)
+                os.chmod(leaf, 0o700)  # our own new dir: a restrictive umask must not lock us out
             except FileExistsError:
                 pass
             fd = os.open(leaf, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         except (OSError, ValueError):
-            raise StateUnusable("open") from None
-        info = os.fstat(fd)
-        if info.st_uid != self.uid():
-            os.close(fd)
-            raise StateUnusable("owner")
-        if info.st_mode & 0o077:
-            os.close(fd)
-            raise StateUnusable("mode")
+            fd = -1
+        if fd < 0:
+            raise StateUnusable("open")
+        reason = None
+        try:
+            try:
+                info = os.fstat(fd)
+                if info.st_uid != self.uid():
+                    reason = "owner"
+                elif stat.S_IMODE(info.st_mode) & 0o7077:
+                    reason = "mode"
+            except OSError:
+                reason = "open"
+        except BaseException:
+            self.close_fd(fd)
+            raise
+        if reason is not None:
+            self.close_fd(fd)
+            raise StateUnusable(reason)
         return fd
 
     def open_state_file(self, dir_fd: int, name: str, *, append: bool = False) -> int:
         """Open ``name`` (a single path component) relative to ``dir_fd``; mode 0600 on create.
 
         ``O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC`` (plus ``O_APPEND`` for the log) and an ``fstat``
-        regular-file check, so a FIFO, symlink or device is ``StateUnusable``, never a hang.
+        check on the descriptor: a regular file owned by the user, one link, no permission bits
+        outside 0600 (no group or other access, no execute, setuid, setgid or sticky bit). A
+        FIFO, symlink, device, hardlinked or foreign file is ``StateUnusable``, never a hang.
+        A file this call just created (``O_CREAT | O_EXCL``) is set to 0600 whatever the umask;
+        an existing one is never changed. Residual (same-user boundary): ``.local`` and
+        ``.local/state`` are followed if they are links; only the leaf is ``O_NOFOLLOW``. The
+        leaf can be swapped between ``mkdir`` and ``open`` by the same user (accepted); after
+        the open every file is relative to the descriptor.
         """
         if not name or "/" in name or name in (".", "..") or "\0" in name:
             raise ValueError("state file name must be one plain path component")
-        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
         if append:
             flags |= os.O_APPEND
+        fd = -1
+        created = False
+        for _ in range(3):  # bounded: a file that keeps vanishing is unusable
+            try:
+                fd = os.open(name, flags | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dir_fd)
+                created = True
+                break
+            except FileExistsError:
+                pass
+            except OSError:
+                break
+            try:
+                fd = os.open(name, flags, dir_fd=dir_fd)
+                break
+            except FileNotFoundError:
+                continue
+            except OSError:
+                break
+        if fd < 0:
+            raise StateUnusable("open")
+        reason = None
         try:
-            fd = os.open(name, flags, 0o600, dir_fd=dir_fd)
-        except OSError:
-            raise StateUnusable("open") from None
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            raise StateUnusable("not_regular")
+            try:
+                if created:
+                    os.fchmod(fd, 0o600)
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode):
+                    reason = "not_regular"
+                elif info.st_uid != self.uid():
+                    reason = "owner"
+                elif info.st_nlink != 1:
+                    reason = "linked"
+                elif stat.S_IMODE(info.st_mode) & 0o7177:
+                    reason = "mode"
+            except OSError:
+                reason = "open"
+        except BaseException:
+            self.close_fd(fd)
+            raise
+        if reason is not None:
+            self.close_fd(fd)
+            raise StateUnusable(reason)
         return fd
+
+    def close_fd(self, fd: int) -> None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     def try_lock(self, fd: int) -> bool:
         """Take an exclusive flock without blocking; ``False`` when another holder has it."""

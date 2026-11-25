@@ -44,6 +44,7 @@ from slack_notice.config import (
     validate_config,
 )
 from slack_notice.gateway import Gateway, SystemGateway
+from slack_notice.log import StateDir
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
 ERROR_EXIT_CODES = frozenset({1, 2, 12, 20})
@@ -255,6 +256,19 @@ class Context:
     # TODO(#25): the deadline gate sets this when it moves to writing; exit 1 then reports
     # unknown_outcome true.
     gate_writing: bool = field(default=False)
+    _state: StateDir | None = field(default=None, repr=False)
+
+    def state_dir(self) -> StateDir:
+        """The run's state directory handle (lazy: nothing is opened until a file is needed).
+
+        Never called for ``send --dry-run --config`` (home is None, no state is used).
+        """
+        assert self.home is not None, "state directory requested without a home"
+        # todo(#28): close the StateDir (with-scope or close()) when wiring send; call state_dir()
+        # only after the dry-run exemption
+        if self._state is None:
+            self._state = StateDir(self.gateway, self.home, self.output.warning)
+        return self._state
 
 
 def sanitize_login(name: str | None) -> str:

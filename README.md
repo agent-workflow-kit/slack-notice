@@ -104,7 +104,7 @@ Plain text only: no formatting, no mentions and no clickable labelled links. The
 
 - Config: `.config/slack-notice/config.yaml` under your home directory (from the password database; a home directory that cannot be used is exit 2) plus `config.d/*.yaml` beside it; `--config <path>` selects another file (cron lines can use it); every key is documented in [config.example.yaml](config.example.yaml) and [Config](docs/interface.md#config).
 - Environment: only the variable named by `webhook_env` (the URL) is read; `HOME`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are not read, and there are no `SLACK_NOTICE_*` overrides ([Environment variables](docs/interface.md#environment-variables)).
-- State: the state directory (`.local/state/slack-notice` under the home directory) holds `log.jsonl` and the lock files ([Files](docs/interface.md#files)). A state problem only warns and never fails a send.
+- State: the state directory (`.local/state/slack-notice` under the home directory) holds `log.jsonl` and the lock files ([Files](docs/interface.md#files)). A state problem (including an unsafe or hardlinked state file, which is refused) only warns and never fails a send.
 
 ## Dependencies
 
