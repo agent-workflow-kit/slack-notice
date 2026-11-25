@@ -8,6 +8,7 @@ the gateway: no connection, no state directory, no lock, no sleep and no read of
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -70,20 +71,37 @@ def dry(
     *,
     stdin: bytes | None = None,
     config: str | None = None,
+    out: Any = None,
+    err: Any = None,
 ) -> Result:
+    """Run main in-process; ``out`` and ``err`` replace the capturing sinks (a failing stream)."""
     if stdin is not None:
         gateway.source_script.append(SourceRead(stdin))
-    out, err = io.BytesIO(), io.BytesIO()
+    kept_out, kept_err = io.BytesIO(), io.BytesIO()
     env = WatchedEnv({"SLACK_WEBHOOK": CRED_URL})
     full = [*argv, *([] if config is None else ["--config", config])]
-    code = main(full, env, gateway, Streams(out, err, lambda: False))
-    return Result(code, out.getvalue(), err.getvalue(), env)
+    streams = Streams(
+        kept_out if out is None else out, kept_err if err is None else err, lambda: False
+    )
+    code = main(full, env, gateway, streams)
+    return Result(code, kept_out.getvalue(), kept_err.getvalue(), env)
 
 
-def assert_untouched(result: Result, gateway: FakeGateway, tmp_path: Path) -> None:
+def assert_untouched(
+    result: Result,
+    gateway: FakeGateway,
+    tmp_path: Path,
+    *,
+    also_read: tuple[str, ...] = (),
+) -> None:
+    """Nothing but the input and the config files was touched, and no clock or environment."""
     assert result.env.accessed == []
     assert gateway.connections == []
     assert set(gateway.events) <= ALLOWED_EVENTS, gateway.events
+    config = str(tmp_path / "cfg" / "config.yaml")
+    allowed_paths = {config, str(tmp_path / "cfg" / "config.d"), *also_read}
+    assert set(gateway.read_paths) <= allowed_paths, gateway.read_paths
+    assert not {"environ", "wall_time"} & set(gateway.calls), gateway.calls
     assert not (Path(gateway._home) / ".local").exists()
     assert CRED_URL not in result.stdout + result.stderr
 
@@ -135,7 +153,7 @@ def test_file_input_golden_json(fake_gateway: FakeGateway, tmp_path: Path) -> No
         "outcome", "tool", "level", "truncated", "bytes", "duration_ms",
         "http_status", "dedupe_key", "rendered",
     ]  # fmt: skip
-    assert_untouched(result, fake_gateway, tmp_path)
+    assert_untouched(result, fake_gateway, tmp_path, also_read=(str(source),))
 
 
 def test_file_dash_reads_stdin(fake_gateway: FakeGateway, tmp_path: Path) -> None:
@@ -201,12 +219,23 @@ def test_default_config_location_is_used_without_the_config_flag(
 
 
 def test_the_result_uses_the_deadline_clock(fake_gateway: FakeGateway, tmp_path: Path) -> None:
+    read_source = fake_gateway.read_source
+
+    def slow_read(*args: Any) -> SourceRead:
+        result = read_source(*args)
+        fake_gateway._advance(1.5)  # the fake clock moves while the input is read
+        return result
+
+    fake_gateway.read_source = slow_read  # type: ignore[method-assign]
     result = dry(
-        ["send", "--dry-run", "--json", "--message", "m"],
+        ["send", "--dry-run", "--json", "--verbose", "--stdin-json"],
         fake_gateway,
+        stdin=b'{"message":"m"}',
         config=write_config(tmp_path),
     )
-    assert isinstance(json.loads(result.stdout)["duration_ms"], int)
+    assert json.loads(result.stdout)["duration_ms"] >= 1500
+    input_line = result.stderr.splitlines()[0]
+    assert input_line.startswith("input: ") and int(input_line.split()[1]) >= 1500
 
 
 # --- --quiet and --verbose --------------------------------------------------------------------
@@ -448,14 +477,12 @@ def guarded_signals() -> Iterator[None]:
         signal.signal(s, handler)
 
 
-def signal_run(
-    sig: signal.Signals, gateway: FakeGateway, tmp_path: Path, *, json_mode: bool
-) -> tuple[Result, list[Callable[..., Any]]]:
+def signal_run(gateway: FakeGateway, tmp_path: Path, *, json_mode: bool) -> Result:
     return dry(
         ["send", "--dry-run", *(["--json"] if json_mode else [])],
         gateway,
         config=write_config(tmp_path),
-    ), []
+    )
 
 
 @pytest.mark.usefixtures("guarded_signals")
@@ -469,7 +496,7 @@ def test_a_signal_during_input_exits_128_plus_n_with_no_output(
         raise AssertionError("the handler must have raised")
 
     fake_gateway.read_source = killed  # type: ignore[method-assign]
-    result, _ = signal_run(sig, fake_gateway, tmp_path, json_mode=json_mode)
+    result = signal_run(fake_gateway, tmp_path, json_mode=json_mode)
     assert (result.code, result.stdout, result.stderr) == (128 + sig, "", "")
     assert set(fake_gateway.events) <= ALLOWED_EVENTS and fake_gateway.connections == []
     assert not (Path(fake_gateway._home) / ".local").exists()
@@ -486,7 +513,7 @@ def test_a_signal_while_rendering_exits_128_plus_n_with_no_output(
 
     monkeypatch.setattr(cli, "render", killed)
     fake_gateway.source_script.append(SourceRead(json.dumps({"message": CANARY}).encode()))
-    result, _ = signal_run(sig, fake_gateway, tmp_path, json_mode=True)
+    result = signal_run(fake_gateway, tmp_path, json_mode=True)
     assert (result.code, result.stdout, result.stderr) == (128 + sig, "", "")
 
 
@@ -495,3 +522,171 @@ def test_handlers_are_restored_after_main(fake_gateway: FakeGateway, tmp_path: P
     before = {s: signal.getsignal(s) for s in SIGNALS}
     dry(["send", "--dry-run", "--message", "m"], fake_gateway, config=write_config(tmp_path))
     assert {s: signal.getsignal(s) for s in SIGNALS} == before
+
+
+# --- failing and signalled streams ------------------------------------------------------------
+
+
+class FailingSink:
+    """A stream whose every write and flush fails (a closed or broken pipe)."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def write(self, data: bytes, /) -> int:
+        raise self._error
+
+    def flush(self) -> None:
+        raise self._error
+
+
+ERRORS = [BrokenPipeError(32, "pipe"), OSError(9, "bad fd"), ValueError("closed")]
+FAILING = [("out",), ("err",), ("out", "err")]
+
+
+def failing(which: tuple[str, ...], error: Exception) -> dict[str, Any]:
+    return {name: FailingSink(error) for name in which}
+
+
+@pytest.mark.parametrize("error", ERRORS, ids=lambda e: type(e).__name__)
+@pytest.mark.parametrize("which", FAILING, ids="+".join)
+@pytest.mark.parametrize("extra", [[], ["--json"], ["--verbose"], ["--verbose", "--json"]])
+def test_a_dry_run_ignores_write_failures_and_exits_0(
+    extra: list[str],
+    which: tuple[str, ...],
+    error: Exception,
+    fake_gateway: FakeGateway,
+    tmp_path: Path,
+) -> None:
+    result = dry(
+        ["send", "--dry-run", "--message", "m", *extra],
+        fake_gateway,
+        config=write_config(tmp_path),
+        **failing(which, error),
+    )
+    assert result.code == 0
+
+
+@pytest.mark.parametrize("error", ERRORS, ids=lambda e: type(e).__name__)
+@pytest.mark.parametrize("which", FAILING, ids="+".join)
+@pytest.mark.parametrize("extra", [[], ["--json"], ["--verbose", "--json"]])
+def test_a_disabled_result_ignores_write_failures_and_exits_22(
+    extra: list[str],
+    which: tuple[str, ...],
+    error: Exception,
+    fake_gateway: FakeGateway,
+    tmp_path: Path,
+) -> None:
+    result = dry(
+        ["send", "--dry-run", "--message", "m", *extra],
+        fake_gateway,
+        config=write_config(tmp_path, DISABLED),
+        **failing(which, error),
+    )
+    assert result.code == 22
+
+
+def test_a_failing_stderr_does_not_lose_the_json_document(
+    fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    result = dry(
+        ["send", "--dry-run", "--json", "--verbose", "--message", "m"],
+        fake_gateway,
+        config=write_config(tmp_path),
+        err=FailingSink(BrokenPipeError()),
+    )
+    assert result.code == 0 and assert_valid("cli/send", result.stdout)["outcome"] == "dry_run"
+
+
+class SignallingSink(io.BytesIO):
+    """Raises ``sig`` at this process from inside the first write, as a real signal would."""
+
+    def __init__(self, sig: signal.Signals) -> None:
+        super().__init__()
+        self._sig: signal.Signals | None = sig
+
+    def write(self, data: Any, /) -> int:
+        if self._sig is not None:
+            sig, self._sig = self._sig, None
+            os.kill(os.getpid(), sig)  # delivered at the next bytecode of the main thread
+        return super().write(data)
+
+
+@pytest.mark.usefixtures("guarded_signals")
+@pytest.mark.parametrize("sig", SIGNALS)
+@pytest.mark.parametrize(
+    ("argv", "config", "sink", "code"),
+    [
+        (["--message", "m"], "{}\n", "err", 0),
+        (["--json", "--message", "m"], "{}\n", "out", 0),
+        ([], DISABLED, "err", 22),
+        (["--json"], DISABLED, "out", 22),
+        (["--message", "m", "--stdin-json"], "{}\n", "err", 2),
+        (["--json", "--message", "m", "--stdin-json"], "{}\n", "out", 2),
+        (["--message", "m"], "max_chars: 1\n", "err", 2),
+    ],
+)
+def test_a_signal_during_the_result_print_is_ignored(
+    sig: signal.Signals,
+    argv: list[str],
+    config: str,
+    sink: str,
+    code: int,
+    fake_gateway: FakeGateway,
+    tmp_path: Path,
+) -> None:
+    signalling = SignallingSink(sig)
+    sinks: dict[str, Any] = {sink: signalling}
+    result = dry(
+        ["send", "--dry-run", *argv],
+        fake_gateway,
+        config=write_config(tmp_path, config),
+        **sinks,
+    )
+    assert result.code == code
+    written = signalling.getvalue().decode()
+    assert written.endswith("\n") and written.strip()  # the whole result, never a partial write
+    if sink == "out" and code != 2:
+        assert json.loads(written)["outcome"] in {"dry_run", "disabled"}
+
+
+# --- the environment is read lazily and never by a dry run --------------------------------------
+
+
+def test_a_dry_run_without_an_injected_env_never_reads_the_environment(
+    fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    out, err = io.BytesIO(), io.BytesIO()
+    code = main(
+        ["send", "--dry-run", "--message", "m", "--config", write_config(tmp_path)],
+        None,
+        fake_gateway,
+        Streams(out, err, lambda: False),
+    )
+    assert code == 0 and "environ" not in fake_gateway.calls
+
+
+# --- assert_untouched itself ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "touch",
+    [
+        lambda gw, tmp: gw.wall_time(),
+        lambda gw, tmp: gw.environ(),
+        lambda gw, tmp: gw.read_regular_file(str(tmp / "log.jsonl"), 10),
+        lambda gw, tmp: gw.list_directory(str(tmp)),
+    ],
+    ids=["wall_time", "environ", "read-log", "list-dir"],
+)
+def test_assert_untouched_fails_on_a_forbidden_call(
+    touch: Callable[[FakeGateway, Path], object], fake_gateway: FakeGateway, tmp_path: Path
+) -> None:
+    result = dry(
+        ["send", "--dry-run", "--message", "m"], fake_gateway, config=write_config(tmp_path)
+    )
+    assert_untouched(result, fake_gateway, tmp_path)  # clean first
+    with contextlib.suppress(OSError):
+        touch(fake_gateway, tmp_path)
+    with pytest.raises(AssertionError):
+        assert_untouched(result, fake_gateway, tmp_path)

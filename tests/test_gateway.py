@@ -524,12 +524,13 @@ def test_environ_call_checker_reports_the_enclosing_function() -> None:
     assert environ_call_sites("def f(g):\n    return g.environ\n") == []
 
 
-def test_the_gateway_environment_is_read_only_by_cli_main() -> None:
+def test_the_gateway_environment_is_read_only_by_the_lazy_env_of_cli_main() -> None:
+    """``_LazyEnv._load`` is the one site: ``main`` hands it out and a dry run never loads it."""
     sites = {
         str(path.relative_to(SRC)): environ_call_sites(path.read_text())
         for path in sorted(SRC.rglob("*.py"))
     }
-    assert {name: found for name, found in sites.items() if found} == {"cli.py": ["main"]}
+    assert {name: found for name, found in sites.items() if found} == {"cli.py": ["_load"]}
 
 
 def test_gateway_itself_is_scanned_and_uses_the_modules() -> None:
