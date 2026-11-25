@@ -30,6 +30,11 @@
       "max_chars": 2000,
       "webhook_env": "_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       "body_variable": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "level_prefix_16_emoji_code_points": {
+      "level_prefix": {
+        "info": "🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵"
+      }
     }
   },
   "invalid": {
@@ -281,6 +286,54 @@
         "timeout"
       ],
       "keyword": "exclusiveMinimum"
+    },
+    "level_prefix_17_emoji_code_points": {
+      "instance": {
+        "level_prefix": {
+          "info": "🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵🔵"
+        }
+      },
+      "path": [
+        "level_prefix",
+        "info"
+      ],
+      "keyword": "pattern"
+    },
+    "level_prefix_nel": {
+      "instance": {
+        "level_prefix": {
+          "warn": "A\u0085B"
+        }
+      },
+      "path": [
+        "level_prefix",
+        "warn"
+      ],
+      "keyword": "pattern"
+    },
+    "level_prefix_c1_control": {
+      "instance": {
+        "level_prefix": {
+          "warn": "A\u009fB"
+        }
+      },
+      "path": [
+        "level_prefix",
+        "warn"
+      ],
+      "keyword": "pattern"
+    },
+    "level_prefix_line_separator": {
+      "instance": {
+        "level_prefix": {
+          "warn": "A\u2028B"
+        }
+      },
+      "path": [
+        "level_prefix",
+        "warn"
+      ],
+      "keyword": "pattern"
     }
   }
 }

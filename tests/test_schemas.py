@@ -5,6 +5,9 @@ Samples live in tests/samples/<schema name>.json:
 `path` is the instance location (list of keys/indexes) and `keyword` the schema keyword
 (`required`, `pattern`, `const`, ...) of one reported error (errors inside oneOf/anyOf branches
 included), so a negative sample must fail for the reason it names, not for some other one.
+A sample whose keyword is `oneOf` or `anyOf` (the error of the whole choice) also names the
+defect inside the branches as `"inner": {"path": [...], "keyword": k}`, so it cannot pass
+because of some unrelated branch error.
 defs.json holds shared definitions only: its labels are `<definition>.<case>` and each sample is
 checked against that entry of `$defs`.
 """
@@ -210,12 +213,19 @@ def test_negative_sample_is_rejected_at_its_named_location_for_its_named_keyword
     name: str, key: str
 ) -> None:
     sample = _samples(name)["invalid"][key]
-    assert set(sample) == {"instance", "path", "keyword"}
+    required = {"instance", "path", "keyword"}
+    assert required <= set(sample) <= required | {"inner"}
     pairs = schema_error_pairs(name, sample["instance"], _target(name, key))
     assert pairs, "negative sample was accepted"
     assert (tuple(sample["path"]), sample["keyword"]) in pairs, (
         f"expected {sample['keyword']} at {sample['path']}, got {sorted(map(str, pairs))}"
     )
+    if sample["keyword"] in ("oneOf", "anyOf"):
+        assert "inner" in sample, "a oneOf/anyOf negative must name the inner defect"
+    if "inner" in sample:
+        assert set(sample["inner"]) == {"path", "keyword"}
+        inner = (tuple(sample["inner"]["path"]), sample["inner"]["keyword"])
+        assert inner in pairs, f"expected inner {inner}, got {sorted(map(str, pairs))}"
 
 
 def test_every_trailing_lf_negative_sample_really_ends_in_lf() -> None:
@@ -225,7 +235,10 @@ def test_every_trailing_lf_negative_sample_really_ends_in_lf() -> None:
         for key, sample in _samples(name)["invalid"].items():
             if "trailing_lf" in key:
                 count += 1
-                assert "\\n" in json.dumps(sample["instance"]), (name, key)
+                value = sample["instance"]
+                for step in sample["path"]:
+                    value = value[step]
+                assert isinstance(value, str) and value.endswith("\n"), (name, key)
     assert count >= 10
 
 
@@ -281,5 +294,6 @@ def test_assert_valid_accepts_a_definition() -> None:
         assert_valid("defs", '"warn\\n"', "level")
 
 
-# TODO(#12): validate config.example.yaml against schemas/config.json (needs the YAML loader of
-# #10); CI's `schemas` job already does it with check-jsonschema.
+# TODO(#12): validate config.example.yaml against schemas/config.json in the test suite (needs the
+# YAML loader of #10); the shared awkit-ci python-ci.yml workflow (called from ci.yml) already
+# runs check-jsonschema on it in its `schemas` job.

@@ -131,23 +131,7 @@
       "path": [
         "http_status"
       ],
-      "keyword": "type"
-    },
-    "http_status_out_of_range": {
-      "instance": {
-        "outcome": "sent",
-        "tool": "slack-notice",
-        "level": "info",
-        "truncated": false,
-        "bytes": 120,
-        "duration_ms": 250,
-        "http_status": 700,
-        "dedupe_key": null
-      },
-      "path": [
-        "http_status"
-      ],
-      "keyword": "maximum"
+      "keyword": "const"
     },
     "wrong_tool": {
       "instance": {
@@ -227,7 +211,7 @@
       "path": [
         "dedupe_key"
       ],
-      "keyword": "oneOf"
+      "keyword": "minLength"
     },
     "dry_run_without_rendered": {
       "instance": {
@@ -284,6 +268,22 @@
       },
       "path": [],
       "keyword": "maxProperties"
+    },
+    "sent_http_status_201": {
+      "instance": {
+        "outcome": "sent",
+        "tool": "slack-notice",
+        "level": "info",
+        "truncated": false,
+        "bytes": 120,
+        "duration_ms": 250,
+        "http_status": 201,
+        "dedupe_key": null
+      },
+      "path": [
+        "http_status"
+      ],
+      "keyword": "const"
     }
   }
 }

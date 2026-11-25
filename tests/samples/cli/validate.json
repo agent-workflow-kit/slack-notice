@@ -50,13 +50,38 @@
     },
     "disabled": {
       "outcome": "disabled"
+    },
+    "test_message_failed": {
+      "ok": false,
+      "enabled": true,
+      "checks": [
+        {
+          "name": "config",
+          "ok": true,
+          "message": "fine"
+        },
+        {
+          "name": "credential",
+          "ok": true,
+          "message": "fine"
+        },
+        {
+          "name": "test_message",
+          "ok": false,
+          "message": "exit 12"
+        }
+      ]
     }
   },
   "invalid": {
     "empty_object": {
       "instance": {},
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [],
+        "keyword": "required"
+      }
     },
     "ok_true_with_failed_check": {
       "instance": {
@@ -71,7 +96,15 @@
         ]
       },
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks",
+          0,
+          "ok"
+        ],
+        "keyword": "const"
+      }
     },
     "ok_false_with_all_ok": {
       "instance": {
@@ -86,7 +119,13 @@
         ]
       },
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks"
+        ],
+        "keyword": "contains"
+      }
     },
     "unknown_check_name": {
       "instance": {
@@ -101,7 +140,15 @@
         ]
       },
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks",
+          0,
+          "name"
+        ],
+        "keyword": "enum"
+      }
     },
     "check_missing_message": {
       "instance": {
@@ -115,7 +162,14 @@
         ]
       },
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks",
+          0
+        ],
+        "keyword": "required"
+      }
     },
     "check_extra_field": {
       "instance": {
@@ -131,25 +185,52 @@
         ]
       },
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks",
+          0
+        ],
+        "keyword": "additionalProperties"
+      }
     },
     "enabled_missing": {
       "instance": {
         "ok": true,
-        "checks": []
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          }
+        ]
       },
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [],
+        "keyword": "required"
+      }
     },
     "extra_field": {
       "instance": {
         "ok": true,
         "enabled": true,
-        "checks": [],
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          }
+        ],
         "x": 1
       },
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [],
+        "keyword": "additionalProperties"
+      }
     },
     "disabled_with_ok": {
       "instance": {
@@ -157,14 +238,184 @@
         "ok": true
       },
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [],
+        "keyword": "additionalProperties"
+      }
     },
     "wrong_outcome": {
       "instance": {
         "outcome": "sent"
       },
       "path": [],
-      "keyword": "oneOf"
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "outcome"
+        ],
+        "keyword": "const"
+      }
+    },
+    "empty_checks": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": []
+      },
+      "path": [
+        "checks"
+      ],
+      "keyword": "minItems",
+      "inner": {
+        "path": [
+          "checks"
+        ],
+        "keyword": "minItems"
+      }
+    },
+    "failed_check_not_last": {
+      "instance": {
+        "ok": false,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": false,
+            "message": "fine"
+          },
+          {
+            "name": "credential",
+            "ok": true,
+            "message": "fine"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks",
+          0,
+          "ok"
+        ],
+        "keyword": "const"
+      }
+    },
+    "duplicate_check": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks",
+          1,
+          "name"
+        ],
+        "keyword": "const"
+      }
+    },
+    "skipped_credential_check": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "test_message",
+            "ok": true,
+            "message": "fine"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks",
+          1,
+          "name"
+        ],
+        "keyword": "const"
+      }
+    },
+    "first_check_not_config": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "credential",
+            "ok": true,
+            "message": "fine"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks",
+          0,
+          "name"
+        ],
+        "keyword": "const"
+      }
+    },
+    "fourth_check": {
+      "instance": {
+        "ok": true,
+        "enabled": true,
+        "checks": [
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "credential",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "test_message",
+            "ok": true,
+            "message": "fine"
+          },
+          {
+            "name": "config",
+            "ok": true,
+            "message": "fine"
+          }
+        ]
+      },
+      "path": [],
+      "keyword": "oneOf",
+      "inner": {
+        "path": [
+          "checks"
+        ],
+        "keyword": "items"
+      }
     }
   }
 }

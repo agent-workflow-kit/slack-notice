@@ -209,6 +209,26 @@
       "retryable": false,
       "retry_after_s": null,
       "unknown_outcome": false
+    },
+    "error.wrong_host_response_302": {
+      "code": "wrong_host_response",
+      "message": "A fixed message.",
+      "reason": null,
+      "details": {
+        "http_status": 302
+      },
+      "retryable": false,
+      "retry_after_s": null,
+      "unknown_outcome": false
+    },
+    "error.wrong_host_response_not_http": {
+      "code": "wrong_host_response",
+      "message": "A fixed message.",
+      "reason": null,
+      "details": null,
+      "retryable": false,
+      "retry_after_s": null,
+      "unknown_outcome": true
     }
   },
   "invalid": {
@@ -230,42 +250,74 @@
     "duration.zero": {
       "instance": 0,
       "path": [],
-      "keyword": "anyOf"
+      "keyword": "anyOf",
+      "inner": {
+        "path": [],
+        "keyword": "exclusiveMinimum"
+      }
     },
     "duration.negative": {
       "instance": -1,
       "path": [],
-      "keyword": "anyOf"
+      "keyword": "anyOf",
+      "inner": {
+        "path": [],
+        "keyword": "exclusiveMinimum"
+      }
     },
     "duration.boolean": {
       "instance": true,
       "path": [],
-      "keyword": "anyOf"
+      "keyword": "anyOf",
+      "inner": {
+        "path": [],
+        "keyword": "type"
+      }
     },
     "duration.zero_string": {
       "instance": "0",
       "path": [],
-      "keyword": "anyOf"
+      "keyword": "anyOf",
+      "inner": {
+        "path": [],
+        "keyword": "pattern"
+      }
     },
     "duration.trailing_lf": {
       "instance": "10s\n",
       "path": [],
-      "keyword": "anyOf"
+      "keyword": "anyOf",
+      "inner": {
+        "path": [],
+        "keyword": "pattern"
+      }
     },
     "duration.hour": {
       "instance": "1h",
       "path": [],
-      "keyword": "anyOf"
+      "keyword": "anyOf",
+      "inner": {
+        "path": [],
+        "keyword": "pattern"
+      }
     },
     "duration.exponent": {
       "instance": "1e3",
       "path": [],
-      "keyword": "anyOf"
+      "keyword": "anyOf",
+      "inner": {
+        "path": [],
+        "keyword": "pattern"
+      }
     },
     "duration.empty": {
       "instance": "",
       "path": [],
-      "keyword": "anyOf"
+      "keyword": "anyOf",
+      "inner": {
+        "path": [],
+        "keyword": "pattern"
+      }
     },
     "ts.no_millis": {
       "instance": "2026-11-24T10:00:00Z",
@@ -1204,6 +1256,291 @@
       },
       "path": [],
       "keyword": "required"
+    },
+    "error.unavailable_null_details": {
+      "instance": {
+        "code": "unavailable",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": null,
+        "retryable": true,
+        "retry_after_s": null,
+        "unknown_outcome": false
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "type"
+    },
+    "error.rate_limited_status_not_429": {
+      "instance": {
+        "code": "rate_limited",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "http_status": 200
+        },
+        "retryable": true,
+        "retry_after_s": 2,
+        "unknown_outcome": false
+      },
+      "path": [
+        "details",
+        "http_status"
+      ],
+      "keyword": "const"
+    },
+    "error.rate_limited_null_retry_after": {
+      "instance": {
+        "code": "rate_limited",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "http_status": 429
+        },
+        "retryable": true,
+        "retry_after_s": null,
+        "unknown_outcome": false
+      },
+      "path": [
+        "retry_after_s"
+      ],
+      "keyword": "type"
+    },
+    "error.rate_limited_missing_http_status": {
+      "instance": {
+        "code": "rate_limited",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {},
+        "retryable": true,
+        "retry_after_s": 2,
+        "unknown_outcome": false
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "required"
+    },
+    "error.upstream_error_status_200": {
+      "instance": {
+        "code": "upstream_error",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "http_status": 200
+        },
+        "retryable": false,
+        "retry_after_s": null,
+        "unknown_outcome": true
+      },
+      "path": [
+        "details",
+        "http_status"
+      ],
+      "keyword": "minimum"
+    },
+    "error.upstream_error_missing_http_status": {
+      "instance": {
+        "code": "upstream_error",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {},
+        "retryable": false,
+        "retry_after_s": null,
+        "unknown_outcome": true
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "required"
+    },
+    "error.wrong_host_response_2xx_unknown_false": {
+      "instance": {
+        "code": "wrong_host_response",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "http_status": 200
+        },
+        "retryable": false,
+        "retry_after_s": null,
+        "unknown_outcome": false
+      },
+      "path": [
+        "unknown_outcome"
+      ],
+      "keyword": "const"
+    },
+    "error.wrong_host_response_302_unknown_true": {
+      "instance": {
+        "code": "wrong_host_response",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "http_status": 302
+        },
+        "retryable": false,
+        "retry_after_s": null,
+        "unknown_outcome": true
+      },
+      "path": [
+        "unknown_outcome"
+      ],
+      "keyword": "const"
+    },
+    "error.wrong_host_response_not_http_unknown_false": {
+      "instance": {
+        "code": "wrong_host_response",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": null,
+        "retryable": false,
+        "retry_after_s": null,
+        "unknown_outcome": false
+      },
+      "path": [
+        "unknown_outcome"
+      ],
+      "keyword": "const"
+    },
+    "error.usage_with_details": {
+      "instance": {
+        "code": "usage",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "key": "x"
+        },
+        "retryable": null,
+        "retry_after_s": null,
+        "unknown_outcome": null
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "type"
+    },
+    "error.internal_with_details": {
+      "instance": {
+        "code": "internal",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "key": "x"
+        },
+        "retryable": false,
+        "retry_after_s": null,
+        "unknown_outcome": true
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "type"
+    },
+    "error.outcome_unknown_with_details": {
+      "instance": {
+        "code": "outcome_unknown",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "tls": true
+        },
+        "retryable": false,
+        "retry_after_s": null,
+        "unknown_outcome": true
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "type"
+    },
+    "error.refused_empty_message_with_details": {
+      "instance": {
+        "code": "refused",
+        "message": "A fixed message.",
+        "reason": "empty_message",
+        "details": {
+          "pointer": ""
+        },
+        "retryable": null,
+        "retry_after_s": null,
+        "unknown_outcome": null
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "type"
+    },
+    "error.refused_link_invalid_with_details": {
+      "instance": {
+        "code": "refused",
+        "message": "A fixed message.",
+        "reason": "link_invalid",
+        "details": {
+          "pointer": ""
+        },
+        "retryable": null,
+        "retry_after_s": null,
+        "unknown_outcome": null
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "type"
+    },
+    "error.refused_link_scheme_with_details": {
+      "instance": {
+        "code": "refused",
+        "message": "A fixed message.",
+        "reason": "link_scheme",
+        "details": {
+          "pointer": ""
+        },
+        "retryable": null,
+        "retry_after_s": null,
+        "unknown_outcome": null
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "type"
+    },
+    "error.unavailable_extra_key": {
+      "instance": {
+        "code": "unavailable",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "phase": "input",
+          "timeout": true
+        },
+        "retryable": true,
+        "retry_after_s": null,
+        "unknown_outcome": false
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "enum"
+    },
+    "error.auth_required_extra_key": {
+      "instance": {
+        "code": "auth_required",
+        "message": "A fixed message.",
+        "reason": null,
+        "details": {
+          "http_status": 401,
+          "env": "X"
+        },
+        "retryable": false,
+        "retry_after_s": null,
+        "unknown_outcome": false
+      },
+      "path": [
+        "details"
+      ],
+      "keyword": "enum"
     }
   }
 }
