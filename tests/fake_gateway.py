@@ -58,6 +58,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from typing import NoReturn
 
 from slack_notice.gateway import (
     CA_FALLBACK_FILES,
@@ -325,6 +326,14 @@ class FakeResponse:
         return data
 
 
+class FakeProcessExit(BaseException):  # noqa: N818  (nothing may swallow the end of the process)
+    """Raised by ``FakeGateway.exit_now`` instead of ending the test process."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class FakeConnection:
     """One scripted send attempt; implements the ``Connection`` protocol.
 
@@ -501,6 +510,7 @@ class FakeGateway(SystemGateway):
         self.state_delay = 0.0  # seconds per state-file operation (open, lock, read)
         self.stall_cap_seconds = 30.0
         self.events: list[str] = []
+        self.exit_codes: list[int] = []  # every exit_now() call
         # environment, clock and identity calls, and every path read: for "touched nothing else"
         # assertions (kept apart from ``events``, which other tests compare whole)
         self.calls: list[str] = []
@@ -624,6 +634,15 @@ class FakeGateway(SystemGateway):
                 raise OverflowError("timestamp too large to convert to C _PyTime_t")
             self._record(f"sleep:{seconds}")
             self._advance(seconds)
+
+    def exit_now(self, code: int) -> NoReturn:
+        """Record the code and raise ``FakeProcessExit``: the process is never ended. The same
+        argument check as the real one."""
+        if type(code) is not int or not 0 <= code <= 255:
+            raise ValueError("an exit code is an integer from 0 to 255")
+        with self._lock:
+            self.exit_codes.append(code)
+        raise FakeProcessExit(code)
 
     # -- name resolution, password database --
 

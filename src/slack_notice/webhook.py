@@ -10,9 +10,9 @@ One send attempt (#23, ``post_once``): the TLS context comes from the gateway, t
 written exactly once through the injected gateway connection, the response status and at most
 4 KiB of body are read, the connection is closed on every path, and the facts come back as an
 ``AttemptResult`` (no exception object, no header, no host, no path). Mapping them to exit codes
-is ``map_attempt`` (#24, below); the gate, the deadline and retries are #25 and #26.
+is ``map_attempt`` (#24, below). The gate, the daemon worker and the hard exit are
+``slack_notice.deadline`` (#25); retries are #26.
 
-TODO(#25): implement the deadline (daemon worker, three-state gate, os._exit).
 TODO(#26): implement retries.
 TODO(#28): call ``read_webhook`` at send step 5 and map ``CredentialInvalid`` to exit 12
 ``credential_invalid`` with ``details.env``.
@@ -148,6 +148,7 @@ def read_webhook(env: Mapping[str, str], name: str) -> Webhook:
 
 CHUNK = 1024  # interface, "Webhook edge": response chunks of at most 1 KiB
 BODY_CAP = 4096  # ... up to a cap of 4 KiB
+MIN_OP_TIMEOUT = 0.001  # the floor of a derived per-operation timeout (0 would be non-blocking)
 _CLASS_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}", re.ASCII)
 
 
@@ -191,15 +192,20 @@ class AttemptResult:
     abandoned: bool = False
 
 
-def _failure(exc: Exception) -> Failure:
-    # ``__name__`` can be a ``str`` subclass instance: use unbound ``str``/``bytes`` methods so
-    # that nothing of the subclass runs or is stored, and keep an exact ``str``.
+def class_name(exc: BaseException) -> str:
+    """The class name of ``exc`` when it is a plain identifier, else ``Exception``; always an exact
+    ``str``. ``__name__`` can be a ``str`` subclass instance: unbound ``str``/``bytes`` methods
+    are used so that nothing of the subclass runs or is stored."""
     try:
         name = bytes.decode(str.encode(type(exc).__name__, "ascii"), "ascii")
     except Exception:
-        name = "Exception"
+        return "Exception"
+    return name if _CLASS_NAME.fullmatch(name) else "Exception"
+
+
+def _failure(exc: Exception) -> Failure:
     return Failure(
-        error_class=name if _CLASS_NAME.fullmatch(name) else "Exception",
+        error_class=class_name(exc),
         timeout=is_timeout(exc),
         tls=is_tls_error(exc),
         cert_verification=is_cert_verification_error(exc),
@@ -215,10 +221,17 @@ def post_once(
     *,
     timeout: float,
     before_write: Callable[[], bool] | None = None,
+    remaining: Callable[[], float] | None = None,
 ) -> AttemptResult:
     """Make exactly one POST attempt and report what happened; never retry, never follow.
 
-    ``timeout`` is the per-operation socket timeout. ``before_write`` is the seam for the
+    ``timeout`` is the per-operation socket timeout. ``remaining`` (seconds left to the deadline)
+    derives each operation's timeout as the smaller of ``timeout`` and the time left (never zero:
+    a tiny positive value, so that an expired deadline fails the operation at once instead of
+    making the socket non-blocking); without it ``timeout`` is fixed. A per-operation timeout
+    cannot bound the whole attempt (a peer that trickles resets it, and a will-close response owns
+    its socket), so the caller's deadline never depends on this function returning.
+    ``before_write`` is the seam for the
     deadline gate: called after connect and before the first call that can put bytes on the
     socket; ``False`` abandons the attempt (nothing written, ``abandoned`` true). An exception
     raised by ``before_write`` is a bug in the gate, not a connect failure: it propagates after
@@ -229,11 +242,18 @@ def post_once(
 
     The path is the secret: it is passed to the gateway as the request target and nowhere else.
     """
-    # TODO(#25): derive the per-operation timeout of each phase from the deadline
-    # (``connection.settimeout`` between phases) and run this in the daemon worker.
-    # TODO(#25): the worker running this may spin until the deadline (an endless 1xx or chunk
-    # trailer stream is not capped here); #25 must bound it by the deadline and ``os._exit``
-    # and never depend on this function's cooperation.
+
+    # The worker running this may spin until the deadline (an endless 1xx or chunk trailer stream
+    # is not capped here): ``slack_notice.deadline`` bounds it by the deadline and the hard exit
+    # and never depends on this function's cooperation.
+    def op_timeout() -> float:
+        if remaining is None:
+            return timeout
+        left = remaining()
+        if not left > 0:  # zero, negative, NaN
+            return MIN_OP_TIMEOUT
+        return max(min(timeout, left), MIN_OP_TIMEOUT)
+
     phase = Phase.CONNECT
     connection: Connection | None = None
     status: int | None = None
@@ -247,7 +267,7 @@ def post_once(
             connection = gateway.https_connection(
                 target.host,
                 target.port,
-                timeout=timeout,
+                timeout=op_timeout(),
                 context=context,
                 user_agent=f"slack-notice/{__version__}",
             )
@@ -261,12 +281,18 @@ def post_once(
             else:
                 try:
                     phase = Phase.WRITE
+                    if remaining is not None:
+                        connection.settimeout(op_timeout())
                     connection.post(target.path, body)
                     phase = Phase.READ
+                    if remaining is not None:
+                        connection.settimeout(op_timeout())
                     response = connection.getresponse()
                     status = response.status
                     total = 0
                     while True:
+                        if remaining is not None:
+                            connection.settimeout(op_timeout())
                         chunk = response.read(min(CHUNK, BODY_CAP + 1 - total))
                         if not chunk:
                             break
