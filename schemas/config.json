@@ -39,6 +39,7 @@
     },
     "level_prefix": {
       "type": "object",
+      "description": "Per-level message prefixes. The schema is a coarse gate: the loader's sanitizer-based check is authoritative for invisible and format characters, leading or trailing whitespace and repeated spaces.",
       "properties": {
         "info": {
           "type": "string",

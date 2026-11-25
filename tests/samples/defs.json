@@ -805,7 +805,9 @@
         "code": "rate_limited",
         "message": "A fixed message.",
         "reason": null,
-        "details": null,
+        "details": {
+          "http_status": 429
+        },
         "retryable": false,
         "retry_after_s": 2,
         "unknown_outcome": false
@@ -820,7 +822,9 @@
         "code": "rate_limited",
         "message": "A fixed message.",
         "reason": null,
-        "details": null,
+        "details": {
+          "http_status": 429
+        },
         "retryable": true,
         "retry_after_s": 2,
         "unknown_outcome": true
@@ -835,7 +839,9 @@
         "code": "rate_limited",
         "message": "A fixed message.",
         "reason": null,
-        "details": null,
+        "details": {
+          "http_status": 429
+        },
         "retryable": true,
         "retry_after_s": -1,
         "unknown_outcome": false
@@ -941,7 +947,9 @@
         "code": "upstream_error",
         "message": "A fixed message.",
         "reason": null,
-        "details": null,
+        "details": {
+          "http_status": 503
+        },
         "retryable": true,
         "retry_after_s": null,
         "unknown_outcome": true
@@ -956,7 +964,9 @@
         "code": "upstream_error",
         "message": "A fixed message.",
         "reason": null,
-        "details": null,
+        "details": {
+          "http_status": 503
+        },
         "retryable": false,
         "retry_after_s": null,
         "unknown_outcome": false
