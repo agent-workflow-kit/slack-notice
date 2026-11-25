@@ -24,6 +24,7 @@ What it models, and how it stays faithful to ``slack_notice.gateway``:
   (inherited) running on the files a test creates under its private home, so hostile paths
   (symlink, FIFO, wrong owner) behave as in production. Hooks can inject failures instead.
 - ``home_dir``, ``uid`` and ``login_name`` are supplied here; ``pwd`` is never consulted.
+  ``is_directory`` is the real check unless ``home_is_directory`` scripts its answer.
 - Name resolution inside ``connect()`` is driven by ``Attempt.resolve_stall``,
   ``Attempt.resolve_error`` and ``Attempt.stall_then_proceed`` only. ``Gateway.resolve`` is a
   scripted protocol hook (``resolve_addresses``, ``resolve_error``) that the real connection
@@ -470,6 +471,7 @@ class FakeGateway(SystemGateway):
         uid: int | None = None,
         login_name: str | None = "tester",
         home_error: bool = False,
+        home_is_directory: bool | None = None,
         wall_start: float = 1_700_000_000.0,
         environment: dict[str, str] | None = None,
     ) -> None:
@@ -478,6 +480,10 @@ class FakeGateway(SystemGateway):
         self._uid = os.getuid() if uid is None else uid
         self._login_name = login_name
         self._home_error = home_error
+        # None: is_directory is the real check; True or False scripts the answer
+        self._home_is_directory = home_is_directory
+        self.source_reads = 0  # calls to read_source(), for "stdin was not read" tests
+        self.home_lookups = 0  # calls to home_dir(), for "looked up once / not at all" tests
         self._wall_start = wall_start
         self._skew = 0.0
         self._t0 = time.monotonic()
@@ -610,9 +616,15 @@ class FakeGateway(SystemGateway):
         return list(self.resolve_addresses)
 
     def home_dir(self) -> str:
+        self.home_lookups += 1
         if self._home_error:
             raise HomeLookupError
         return self._home
+
+    def is_directory(self, path: str) -> bool:
+        if self._home_is_directory is not None:
+            return self._home_is_directory
+        return super().is_directory(path)
 
     def uid(self) -> int:
         return self._uid
@@ -629,6 +641,7 @@ class FakeGateway(SystemGateway):
         self, fd_or_path: int | str | os.PathLike[str], max_bytes: int, remaining: float
     ) -> SourceRead:
         self._record("read_source")
+        self.source_reads += 1
         if self.source_script:
             result = self.source_script.pop(0)
             if isinstance(result, BaseException):
