@@ -31,7 +31,7 @@ import pytest
 
 from tests.harness import ROOT, assert_valid
 from tests.send_harness import ENV_NAME, URL
-from tests.test_secrets_env import GUARD_EXIT, guarded_env
+from tests.test_secrets_env import guarded_env
 
 DOC = (ROOT / "docs" / "automation.md").read_text(encoding="utf-8")
 INTERFACE = (ROOT / "docs" / "interface.md").read_text(encoding="utf-8")
@@ -201,6 +201,61 @@ def test_the_doc_states_the_kill_and_stdin_rules() -> None:
     assert "`\\%`" in FLAT and "does not read your profile" in FLAT
 
 
+def test_the_doc_states_the_remaining_wordings() -> None:
+    assert "It checks `unknown_outcome` before `retryable`" in FLAT
+    assert "a burst of 12 requests in about 3 seconds got 429 in testing" in FLAT
+    assert "the result print waits at most 1 s for a stalled reader" in FLAT
+    assert "the process ends within `timeout` plus 3 s regardless" in FLAT
+    assert "`details.timeout` is true when a connection attempt itself timed out" in FLAT
+    assert "the deadline arrived before any failure had been recorded" in FLAT
+    assert "do not depend on the order of the keys inside `details`" in FLAT
+    assert "reopened" not in FLAT and "/dev/null" not in FLAT
+    assert "`unexpected-exit`" in FLAT and "137 (SIGKILL) means that something killed" in FLAT
+    assert "SIGTERM after the send started yields the deadline result" in FLAT
+    assert "a dry run carries the rendered message" in FLAT
+
+
+def test_the_cron_lines_join_the_env_file_and_the_tool_with_and_and() -> None:
+    for kind in ("send", "validate"):
+        line = cron_line(kind)
+        assert '. "$HOME/.config/slack-notice/env" && "$HOME/.local/bin/slack-notice" ' in line
+        assert ";" not in line.split('slack-notice" ')[0]
+    assert '|| echo "slack-notice failed: $?" >&2' in cron_line("send")
+
+
+def test_the_env_file_recipe_exports_and_keeps_the_secret_off_the_command_line() -> None:
+    recipe = of("manual")[0].text
+    assert re.search(r"export SLACK_WEBHOOK=", recipe)
+    assert re.search(r"\(\n\s+umask 077\n(?:.*\n)*?\)", recipe)  # in a subshell
+    assert "rm -f" in recipe and "chmod 600" in recipe and "ls -l" in recipe
+    assert "IFS= read -r url" in recipe
+    for line in recipe.splitlines():  # the secret only ever sits in a shell built-in's argument
+        if "$url" in line:
+            assert line.lstrip().startswith("printf ")
+
+
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_the_env_file_recipe_makes_a_0600_file_that_exports(
+    tmp_path: Path, preexisting: bool
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = {"HOME": str(home), "XDG_CONFIG_HOME": str(tmp_path / "xdg"), "PATH": "/usr/bin:/bin"}
+    target = home / ".config" / "slack-notice" / "env"
+    if preexisting:
+        target.parent.mkdir(parents=True)
+        target.write_text("old\n", encoding="utf-8")
+        target.chmod(0o644)
+    code, _, err = run(["/bin/sh", "-c", of("manual")[0].text], env, tmp_path, URL.encode() + b"\n")
+    assert code == 0, err
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    probe = subprocess.run(  # noqa: S603
+        ["/bin/sh", "-c", f'. "{target}" && /usr/bin/env'],
+        env=env, capture_output=True, text=True, timeout=30, check=True,
+    )  # fmt: skip
+    assert f"{ENV_NAME}={URL}" in probe.stdout.splitlines()
+
+
 # --- real processes -----------------------------------------------------------------------------
 
 
@@ -220,10 +275,6 @@ def run(
         process.communicate()
         raise
     return process.returncode, out.decode(), err.decode()
-
-
-def test_no_child_is_left_behind() -> None:
-    assert all(p.poll() is not None for p in SPAWNED)
 
 
 def cron_commands() -> list[tuple[str, str]]:
@@ -298,11 +349,17 @@ def test_the_documented_nightly_line_runs_with_an_env_file_of_mode_0600(tmp_path
     assert document["outcome"] == "dry_run" and document["rendered"]
 
 
+def test_a_failing_send_writes_its_exit_code_to_stderr_for_cron_to_mail(tmp_path: Path) -> None:
+    m = machine(tmp_path, extra="--no-such-flag")
+    code, out, err = run(["/bin/sh", "-c", cron_line("send")], m.env, m.home)
+    assert (code, out, err) == (0, "", "slack-notice failed: 2\n")
+    assert m.log.read_text(encoding="utf-8")  # the details stay in the file
+
+
 def test_the_documented_health_line_reads_the_credential_from_the_env_file(tmp_path: Path) -> None:
     m = machine(tmp_path, extra="")
     code, out, err = run(["/bin/sh", "-c", cron_line("validate")], m.env, m.home)
     assert (code, out, err) == (0, "", "")  # --quiet: nothing when ok
-    assert code != GUARD_EXIT
 
 
 def test_without_the_env_file_credential_the_health_line_fails(tmp_path: Path) -> None:
@@ -361,6 +418,11 @@ SNIPPET_CASES = [
     (1, "", "internal-outcome-unknown", 1),
     (2, golden("usage_unknown_flag.stdout"), "deployment-fault", 2),
     (143, "", "stopped-by-signal", 143),
+    (130, "", "stopped-by-signal", 130),
+    (129, "", "stopped-by-signal", 129),
+    (137, "", "unexpected-exit", 137),
+    (127, "", "unexpected-exit", 127),
+    (12, "[" * 5000, "surface", 12),  # nests deeper than the parser allows
 ]
 
 
@@ -373,6 +435,16 @@ def test_the_shell_snippet_handles_each_exit_code(
     env = {"PATH": f"{stubs}:/usr/bin:/bin", "STUB_OUT": stdout, "STUB_RC": str(rc)}
     code, out, err = run(["/bin/sh", "-c", of("test-sh")[0].text], env, tmp_path)
     assert (code, out, err) == (final, f"action={action}\n", ""), (out, err)
+
+
+@pytest.mark.parametrize("rc", [0, 12, 20, 22, 143])
+def test_the_shell_snippet_is_safe_under_set_e(rc: int, tmp_path: Path) -> None:
+    stubs = stub_dir(tmp_path, 'cat >/dev/null\nprintf "%s\\n" "$STUB_OUT"\nexit "$STUB_RC"\n')
+    out = golden("rate_limited.stdout")
+    env = {"PATH": f"{stubs}:/usr/bin:/bin", "STUB_OUT": out, "STUB_RC": str(rc)}
+    code, out, err = run(["/bin/sh", "-e", "-c", of("test-sh")[0].text], env, tmp_path)
+    assert out.startswith("action="), (code, out, err)
+    assert code == (0 if rc in (0, 22) else rc)
 
 
 def test_the_shell_snippet_passes_the_payload_on_stdin_and_never_in_argv(tmp_path: Path) -> None:
@@ -405,23 +477,58 @@ def test_the_python_function_survives_a_tool_that_does_not_read_stdin(
     body = golden("credential_invalid.stdout")
     stubs = stub_dir(tmp_path, f"printf '%s\\n' '{body}'\nexit 12\n")
     notify = load_notify(monkeypatch, stubs)
-    code, document = notify({"message": "x" * 3_000_000})  # far more than a pipe holds
-    assert code == 12 and document is not None
+    code, document, timed_out = notify({"message": "x" * 3_000_000}, 10.0)  # more than a pipe holds
+    assert code == 12 and document is not None and not timed_out
     assert document["error"]["code"] == "credential_invalid"
 
 
-def test_the_python_function_signals_with_sigterm_after_the_limit(
+def test_the_python_function_takes_the_exit_code_the_tool_gives_after_sigterm(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stubs = stub_dir(tmp_path, "exec sleep 30\n")
+    # before the send started: the tool exits 143 with nothing on stdout
+    stubs = stub_dir(tmp_path, "trap 'exit 143' TERM\nwhile :; do sleep 0.1; done\n")
+    code, document, timed_out = load_notify(monkeypatch, stubs)({"message": "hi"}, -9.7)
+    assert (code, document, timed_out) == (143, None, True)
+
+
+def test_the_python_function_returns_the_deadline_result_after_sigterm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body = golden("network_error.stdout")
+    script = f"trap 'printf \"%s\\n\" '\\''{body}'\\''; exit 12' TERM\n"
+    stubs = stub_dir(tmp_path, script + "while :; do sleep 0.1; done\n")
+    code, document, timed_out = load_notify(monkeypatch, stubs)({"message": "hi"}, -9.7)
+    assert code == 12 and timed_out and document is not None
+    assert document["error"]["code"] == "network_error"
+
+
+def test_the_python_function_kills_only_a_tool_that_ignores_sigterm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stubs = stub_dir(tmp_path, "trap '' TERM\nwhile :; do sleep 0.1; done\n")
     notify = load_notify(monkeypatch, stubs)
-    code, document = notify({"message": "hi"}, timeout_s=-9.7)  # a 0.3 s limit
-    assert code == -15 and document is None
+    notify.__globals__["GRACE_S"] = 0.3
+    assert notify({"message": "hi"}, -0.2) == (None, None, True)
 
 
 def test_the_python_function_returns_none_for_output_that_is_not_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stubs = stub_dir(tmp_path, "cat >/dev/null\necho '[1]'\nexit 0\n")
-    code, document = load_notify(monkeypatch, stubs)({"message": "hi"})
+    code, document, _ = load_notify(monkeypatch, stubs)({"message": "hi"}, 10.0)
     assert code == 0 and document is None
+
+
+def test_the_python_function_survives_output_nested_too_deeply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stubs = stub_dir(tmp_path, "cat >/dev/null\nprintf '%05000d' 0 | tr 0 '['\nexit 12\n")
+    code, document, _ = load_notify(monkeypatch, stubs)({"message": "hi"}, 10.0)
+    assert code == 12 and document is None
+
+
+# --- last: runs after every test above that spawned a child -------------------------------------
+
+
+def test_no_child_is_left_behind() -> None:
+    assert all(p.poll() is not None for p in SPAWNED)
