@@ -125,10 +125,12 @@ def test_a_lone_surrogate_in_a_flag_is_exit_20_with_the_flag_pointer(
     assert_valid("cli/error", out)
     error = json.loads(out)["error"]
     assert error["reason"] == "invalid_payload" and error["details"]["pointer"] == f"/{flag}"
-    assert "\udc80" not in out + err and "a" + "\udc80" + "b" not in out + err
+    assert "\udc80" not in out + err
 
 
-def test_a_bad_level_carrying_a_surrogate_is_reported_at_level_without_echo(
+# Pins enum-first ordering and the no-echo behaviour; the surrogate check itself is
+# pinned by the title/message/link cases above.
+def test_a_bad_level_with_a_surrogate_fails_the_enum_rule_at_level_without_echo(
     fake_gateway: FakeGateway, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     code, out, err = run_capturing(
