@@ -38,9 +38,10 @@ from slack_notice import __version__
 from slack_notice.config import (
     ConfigInvalid,
     HomeUnusable,
+    config_file_key,
     load_config,
     resolve_home,
-    resolve_settings,
+    validate_config,
 )
 from slack_notice.gateway import Gateway, SystemGateway
 
@@ -404,19 +405,28 @@ def load_settings(ctx: Context) -> dict[str, Any]:
     """The effective settings: flags, then the config file and drop-ins, then the defaults.
 
     A file that cannot be used is exit 2 config_invalid with the file path (or `--config` for a
-    missing --config file) in details.key and a fixed message. The values are not validated yet.
+    missing --config file) in details.key and a fixed message. A value that breaks a rule is the
+    same error with the config key name (or `?`) in details.key and a message that names the key
+    and the rule (never the value).
     """
-    # TODO(#11): validate the values and map DurationError and unknown keys to config_invalid.
     # TODO(#28), TODO(#31), TODO(#32): the send and validate handlers call this; they wire it in.
     key: str | None = None
-    values: dict[str, Any] = {}
+    message = ""
+    settings: dict[str, Any] = {}
     try:
         values = load_config(ctx.gateway, home=ctx.home, config_path=ctx.config)
+        settings = validate_config(
+            values, fallback_key=config_file_key(ctx.gateway, home=ctx.home, config_path=ctx.config)
+        )
     except ConfigInvalid as error:
         key = error.key
+        message = error.message
     if key is not None:  # raised here, not in the handler: no context is kept
-        raise CliError(2, "config_invalid", "configuration is invalid", details={"key": key})
-    return resolve_settings(values, {})
+        raise CliError(
+            2, "config_invalid", message or "configuration is invalid", details={"key": key}
+        )
+    # TODO(#16): overlay the flag values (resolve_settings) once the flags are checked.
+    return settings
 
 
 def _not_implemented(_ctx: Context) -> int:

@@ -76,7 +76,7 @@
       "minimum": 2000,
       "maximum": 12000,
       "default": 3000,
-      "description": "Body limit in Unicode code points; a 12000-byte cap on the request body also applies."
+      "description": "Body limit in Unicode code points; a 12000-byte cap on the request body also applies. The loader accepts decimal integers only and refuses a fraction such as 3000.0."
     },
     "timeout": {
       "$ref": "#/$defs/duration",

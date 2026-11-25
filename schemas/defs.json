@@ -149,7 +149,7 @@
         "message": {
           "type": "string",
           "minLength": 1,
-          "description": "A fixed string of the tool: never a response body, header, exception text, input value, the webhook URL or any part of it."
+          "description": "A string built by the tool (fixed, or for a config value rule the key path and the rule): never a response body, header, exception text, input value, the webhook URL or any part of it."
         },
         "reason": {
           "type": [
