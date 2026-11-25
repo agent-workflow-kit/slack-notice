@@ -478,6 +478,7 @@ class FakeGateway(SystemGateway):
         self._uid = os.getuid() if uid is None else uid
         self._login_name = login_name
         self._home_error = home_error
+        self.home_lookups = 0  # calls to home_dir(), for "looked up once / not at all" tests
         self._wall_start = wall_start
         self._skew = 0.0
         self._t0 = time.monotonic()
@@ -610,6 +611,7 @@ class FakeGateway(SystemGateway):
         return list(self.resolve_addresses)
 
     def home_dir(self) -> str:
+        self.home_lookups += 1
         if self._home_error:
             raise HomeLookupError
         return self._home

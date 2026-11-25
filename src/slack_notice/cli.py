@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from typing import Any, NoReturn, Protocol
 
 from slack_notice import __version__
+from slack_notice.config import HomeUnusable, resolve_home
 from slack_notice.gateway import Gateway, SystemGateway
 
 # Exit codes in use (interface: Exit codes); 0 is a success and never a CliError.
@@ -241,6 +242,7 @@ class Context:
     verbose: bool
     quiet: bool
     config: str | None
+    home: str | None  # None only for `send --dry-run --config`, which needs no home
     actor: str
     actor_source: str
     # TODO(#25): the deadline gate sets this when it moves to writing; exit 1 then reports
@@ -417,6 +419,23 @@ def _internal_error(exc: Exception, *, gate_writing: bool) -> CliError:
     )
 
 
+def _lookup_home(args: argparse.Namespace, gateway: Gateway) -> str | None:
+    """Step 2: the home from the password database, once, before any input is read.
+
+    Skipped (None) only for `send --dry-run` with `--config` (even an empty one: whether that
+    file exists is config loading's question). Anything else that cannot get a usable home is
+    exit 2 config_invalid with details.key `home`.
+    """
+    if args.command == "send" and args.dry_run and args.config is not None:
+        return None
+    try:
+        return resolve_home(gateway)
+    except HomeUnusable:
+        raise CliError(
+            2, "config_invalid", "configuration is invalid", details={"key": "home"}
+        ) from None
+
+
 def _run(
     argv: list[str],
     env: Mapping[str, str],
@@ -425,6 +444,7 @@ def _run(
     holder: list[Context],
 ) -> int:
     args = parse(argv)
+    home = _lookup_home(args, gateway)
     actor, actor_source = resolve_actor(args.actor, tty=streams.stdin_is_tty(), gateway=gateway)
     ctx = Context(
         args=args,
@@ -436,6 +456,7 @@ def _run(
         verbose=args.verbose,
         quiet=args.quiet,
         config=args.config,
+        home=home,
         actor=actor,
         actor_source=actor_source,
     )

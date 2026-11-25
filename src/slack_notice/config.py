@@ -1,6 +1,5 @@
-"""Config, drop-ins, YAML and durations.
+"""Config, drop-ins, YAML and durations, and the home lookup.
 
-TODO(#9): implement the home lookup from the password database.
 TODO(#10): implement config loading.
 TODO(#11): implement config validation: validate `timeout` with `check_duration`; a DurationError
 becomes exit 2 config_invalid, details.key its `key`; build the message from key and rule only
@@ -10,9 +9,15 @@ becomes exit 2 config_invalid, details.key its `key`; build the message from key
 from __future__ import annotations
 
 import math
+import os
 import re
 from fractions import Fraction
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from slack_notice.gateway import HomeLookupError
+
+if TYPE_CHECKING:
+    from slack_notice.gateway import Gateway
 
 # One grammar for every duration key (interface.md, Config). It must agree with the `duration`
 # definition in schemas/defs.json: ASCII digits only, no sign, no exponent, nothing around it.
@@ -92,3 +97,38 @@ def check_duration(key: str, value: Any) -> float:
     if seconds is None or not (lo <= seconds <= hi):
         raise DurationError(key, f"must be a duration from {lo}s to {hi}s")
     return float(seconds)
+
+
+class HomeUnusable(Exception):
+    """The password-database home cannot be used (lookup failed; empty, relative, not a directory).
+
+    The message is fixed; it never holds the path, and no cause is chained.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("home directory cannot be used")
+
+
+def resolve_home(gateway: Gateway) -> str:
+    """The home directory of the current uid from the password database, checked for use.
+
+    Returned as found (no normalising; trailing slashes stay). HOME and XDG_* are never read:
+    the only source is `gateway.home_dir()`. Refused: a failed lookup, an empty or relative path
+    (so also `~` and `$HOME`, which are never expanded), a path with a NUL, and anything that is
+    not an existing directory (a symlink to one is fine; a dangling link is not).
+    """
+    try:
+        home = gateway.home_dir()
+    except HomeLookupError:
+        raise HomeUnusable from None
+    # Not `os.path.isdir` alone: it hides every OSError, which is what we want, but a str with a
+    # NUL or surrogates must also be refused without raising anything else.
+    if not isinstance(home, str) or not home or not os.path.isabs(home) or "\x00" in home:
+        raise HomeUnusable
+    try:
+        is_directory = os.path.isdir(home)
+    except (OSError, ValueError):
+        is_directory = False
+    if not is_directory:
+        raise HomeUnusable
+    return home
