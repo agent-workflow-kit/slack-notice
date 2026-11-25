@@ -17,7 +17,7 @@ Implements [interface.md](interface.md) and [design.md](design.md). The issues f
 
 | Module | Stage | Responsibility |
 |---|---|---|
-| `gateway.py` | 0 | HTTP, TLS context, clock, name resolution, home directory, `is_directory` and uid, input reading, CA path candidates, state files; also `wall_time`, `sleep`, `login_name`, `read_regular_file`, `try_lock`, `unlock`, `file_size`, `read_at`, `write_fd`, `truncate_fd`, `rename_state_file` and the `StateUnusable` and `NotRegularFile` errors. |
+| `gateway.py` | 0 | HTTP, TLS context, clock, name resolution, home directory, `is_directory` and uid, input reading, CA path candidates, state files; also `wall_time`, `sleep`, `login_name`, `read_regular_file`, `try_lock`, `unlock`, `file_size`, `file_mtime`, `set_mtime`, `read_at`, `write_fd`, `truncate_fd`, `rename_state_file` and the `StateUnusable` and `NotRegularFile` errors. |
 | `cli.py` | 0, 3, 4 | Parsing, dispatch, exit codes, output. |
 | `config.py` | 1 | Config, drop-ins, YAML, durations. |
 | `log.py` | 1 | State directory, log records and rotation. |

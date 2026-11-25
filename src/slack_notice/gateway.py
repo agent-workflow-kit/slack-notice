@@ -235,7 +235,8 @@ class Gateway(Protocol):
 
     def set_mtime(self, fd: int, seconds: float) -> None:
         """Set the access and modification time of the open file (``os.utime`` on the
-        descriptor). ``OSError`` (``EROFS``, ``EPERM``, ...) or ``ValueError`` (NaN) on failure."""
+        descriptor). ``OSError`` (``EROFS``, ``EPERM``, ...), ``ValueError`` (NaN) or
+        ``OverflowError`` (too large) on failure."""
         ...
 
     def rename_state_file(self, dir_fd: int, source: str, target: str) -> None:

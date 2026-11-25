@@ -327,12 +327,79 @@ def test_the_spacing_wait_respects_the_deadline(gw: FakeGateway, state: Any, hom
     make_lock_file(home, size=1, mtime=WALL - 0.2)  # 0.8 s still to wait
     path = lock_path(home)
     deadline = gw.monotonic() + 0.3
+    before = open_fds(state)
     with pytest.raises(SendLockTimeout):
         acquire(state, gw, deadline)
-    assert sum(sleeps(gw)) == pytest.approx(0.3, abs=1e-2)  # waited up to the deadline only
-    assert gw.monotonic() >= deadline
+    assert sleeps(gw) == []  # a wait longer than the time that remains ends the send at once
+    assert gw.monotonic() < deadline
     assert can_flock(path)  # released
+    assert open_fds() == before
     assert path.stat().st_mtime == pytest.approx(WALL - 0.2, abs=1e-3)  # not stamped
+
+
+def test_a_spacing_wait_equal_to_the_time_remaining_also_ends_at_once(
+    gw: FakeGateway, state: Any, home: Path
+) -> None:
+    path = make_lock_file(home, size=1, mtime=WALL - 0.2)
+    exact_wait = SPACING_S - (WALL - path.stat().st_mtime_ns / 1e9)  # as the code computes it
+    gw.monotonic = lambda: 100.0  # type: ignore[method-assign]
+    with pytest.raises(SendLockTimeout):
+        acquire(state, gw, 100.0 + exact_wait)
+    assert sleeps(gw) == []
+
+
+def test_the_size_and_time_are_read_after_the_lock_is_taken(
+    gw: FakeGateway, state: Any, home: Path
+) -> None:
+    """Another process stamps the file while this one waits on a busy flock: the wait must come
+    from the file as it is once the lock is held. A real two-process 1 s test is not added (slow
+    and flaky); this fake holder is deterministic."""
+    make_lock_file(home, size=0, mtime=WALL - 5)  # empty before the lock is taken
+    calls = {"n": 0}
+    real_try_lock = gw.try_lock
+
+    def try_lock(fd: int) -> bool:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            make_lock_file(home, size=1, mtime=WALL - 0.25)  # the "other process" stamps
+            return False
+        return real_try_lock(fd)
+
+    gw.try_lock = try_lock  # type: ignore[method-assign]
+    with take(state, gw, FAR) as lock:
+        assert lock is not None
+    assert sleeps(gw) == [POLL_S, pytest.approx(0.75, abs=1e-5)]
+
+
+def test_a_failed_set_mtime_leaves_the_write_time_and_the_next_send_waits_a_second(
+    gw: FakeGateway, state: Any, home: Path, warned: Lines
+) -> None:
+    gw.set_mtime_error = OSError(errno.EPERM, "x")
+    with take(state, gw, FAR) as first:
+        first.stamp()  # the byte is written, the utime fails: one warning
+    assert warned.lines == [STATE_WARNING]
+    gw.set_mtime_error = None
+    nanos = int((WALL - 0.003) * 1e9)
+    os.utime(lock_path(home), ns=(nanos, nanos))  # as the write: ~now
+    with take(state, gw, FAR) as second:
+        assert second is not None
+    assert sleeps(gw) == [pytest.approx(0.997, abs=1e-5)]
+    assert warned.lines == [STATE_WARNING]
+
+
+def test_a_failure_right_after_the_open_closes_the_descriptor(
+    gw: FakeGateway, state: Any, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import slack_notice.spacing as spacing
+
+    def broken(*_args: Any) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(spacing, "SendLock", broken)
+    before = open_fds(state)
+    with pytest.raises(KeyboardInterrupt):
+        acquire(state, gw, FAR)
+    assert open_fds() == before
 
 
 def test_the_spacing_wait_that_ends_before_the_deadline_proceeds(

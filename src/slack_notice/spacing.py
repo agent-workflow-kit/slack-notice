@@ -4,7 +4,9 @@
 polled without blocking every 50 ms inside the deadline. A file of size 0 means no earlier
 send; otherwise the call waits until one second has passed since the file's modification time,
 ignoring a modification time in the future or more than one second old (so a clock that went
-backwards never causes a wait, and no wait exceeds one second). The file's content is never
+backwards never causes a wait, and no wait exceeds one second). A spacing wait that is not
+shorter than the time left to the deadline ends the send at once (``SendLockTimeout``) without
+sleeping. The file's content is never
 read. ``SendLock.stamp`` writes one byte to a file of size 0 and sets the modification time to
 the gateway's wall time when the POST is about to start; ``release`` ends the lock at the end
 of step 6, before the log record.
@@ -48,6 +50,10 @@ class SendLock:
         self._fd: int | None = fd
         self._locked = False
         self._stamped = False
+
+    def mark_locked(self) -> None:
+        """Record that the flock is held, so ``release`` unlocks it."""
+        self._locked = True
 
     def __enter__(self) -> SendLock:
         return self
@@ -119,20 +125,23 @@ def acquire(state: StateDir, gateway: Gateway, deadline: float) -> SendLock | No
     ``deadline`` is an absolute ``gateway.monotonic()`` value. Returns the held lock, or
     ``None`` when there is no spacing (the state is unusable or the lock call failed; the one
     warning was given and the caller sends anyway). Raises ``SendLockTimeout`` when the
-    deadline passes first (after waiting up to it); the lock is released on every path.
+    deadline passes while waiting for the flock (after polling up to it), or at once, without
+    sleeping, when the spacing wait is not shorter than the time that remains; the lock is
+    released on every path.
     """
     fd = state.open_file(LOCK_NAME)
     if fd is None:
         return None
-    lock = SendLock(state, gateway, fd)
+    lock: SendLock | None = None
     try:
+        lock = SendLock(state, gateway, fd)
         try:
             _take_lock(gateway, fd, deadline)
         except OSError:
             state.warn()
             lock.release()
             return None
-        lock._locked = True
+        lock.mark_locked()
         try:
             wait = _spacing_wait(gateway, fd)
         except (OSError, ValueError, OverflowError):
@@ -140,12 +149,15 @@ def acquire(state: StateDir, gateway: Gateway, deadline: float) -> SendLock | No
             wait = 0.0
         if wait > 0:
             remaining = deadline - gateway.monotonic()
-            if not wait < remaining:  # the deadline passes during the wait (or is NaN)
-                if remaining > 0:
-                    gateway.sleep(remaining)
+            if not wait < remaining:  # too long for the deadline (or NaN): end at once
                 raise SendLockTimeout
+            # todo(#27): a signal during this wait must be noticed within 100 ms (slice the
+            # sleep or check the flag); the wait is up to 1 s unsliced here.
             gateway.sleep(wait)
         return lock
     except BaseException:
-        lock.release()
+        if lock is None:
+            gateway.close_fd(fd)
+        else:
+            lock.release()
         raise
